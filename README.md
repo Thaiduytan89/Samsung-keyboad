@@ -2,13 +2,24 @@
 
 Bàn phím Android kiểu Samsung, viết bằng Kotlin. Không quảng cáo, không thu thập dữ liệu.
 
+## Chuyển ngôn ngữ và gõ tiếng Việt (Telex)
+
+Phím **VI / EN** ở hàng dưới cùng để chuyển giữa tiếng Việt (gõ Telex) và tiếng Anh. Bàn phím nhớ lựa chọn lần trước.
+
+- Dấu thanh: s=sắc, f=huyền, r=hỏi, x=ngã, j=nặng, z=xóa dấu
+- aa=â, ee=ê, oo=ô, aw=ă, ow=ơ, uw=ư, dd=đ, uow=ươ
+- Gõ lặp lại phím vừa tạo dấu thì hủy dấu (aaa=aa, ss=s, ww=w)
+- Ví dụ: `Vieetj` = Việt, `dduowcj` = được, `nguowif` = người
+- Tự tắt Telex ở ô mật khẩu, email và địa chỉ web
+
 ## Dịch
 
 Bấm nút **Dịch** trên thanh phía trên bàn phím:
-- Chạm tên ngôn ngữ để đổi, chạm ⇄ để đảo chiều, bấm **Dịch** để dịch.
+- Chạm "Dịch sang: ..." để đổi giữa English, 繁體中文 (Hoa phồn thể), မြန်မာ (Myanmar), rồi bấm **Dịch**.
+- Tự nhận diện ngôn ngữ đang gõ.
 - Có bôi đen đoạn chữ thì chỉ dịch đoạn đó, không thì dịch toàn bộ chữ trong ô rồi thay thế.
-- Dùng Google ML Kit: lần đầu mỗi ngôn ngữ cần mạng để tải gói (~30MB), sau đó dịch offline. Chữ bạn gõ không bị gửi lên máy chủ nào.
-- App xin quyền Internet chỉ để tải gói ngôn ngữ.
+- Cần có mạng. Khi bấm Dịch, đoạn chữ cần dịch được gửi lên dịch vụ dịch của Google. Bàn phím không gửi gì khác.
+- Lưu ý: app dùng đường dẫn dịch không chính thức của Google (không cần khóa API), nên có thể bị giới hạn hoặc ngừng hoạt động.
 
 ## Tính năng
 

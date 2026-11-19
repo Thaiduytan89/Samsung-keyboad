@@ -1,5 +1,6 @@
 package com.example.samkeyboard
 
+import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -7,31 +8,38 @@ import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
 import android.widget.TextView
-import com.google.mlkit.common.model.DownloadConditions
-import com.google.mlkit.nl.translate.TranslateLanguage
-import com.google.mlkit.nl.translate.Translation
-import com.google.mlkit.nl.translate.Translator
-import com.google.mlkit.nl.translate.TranslatorOptions
+import org.json.JSONArray
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.net.UnknownHostException
 
 /**
- * Bàn phím QWERTY kiểu Samsung: hàng số trên cùng, Shift (chạm đúp = Caps Lock),
- * giữ phím xóa để xóa liên tục, tự viết hoa đầu câu, chạm đúp dấu cách = ". ",
- * 2 trang ký hiệu, giao diện sáng/tối theo hệ thống.
+ * Bàn phím QWERTY kiểu Samsung:
+ *  - Chuyển đổi English / Tiếng Việt (gõ Telex) bằng phím EN/VI
+ *  - Dịch sang English, 繁體中文, မြန်မာ
+ *  - Shift (chạm đúp = Caps Lock), giữ phím xóa để xóa liên tục, tự viết hoa đầu câu,
+ *    chạm đúp dấu cách = ". ", 2 trang ký hiệu, giao diện sáng/tối theo hệ thống.
  */
 class SamKeyboardService : InputMethodService() {
 
     private enum class Layer { LETTERS, SYMBOLS_1, SYMBOLS_2 }
     private enum class Shift { OFF, ON, LOCK }
-    private enum class Kind { TEXT, SHIFT, DELETE, TO_SYMBOLS_1, TO_SYMBOLS_2, TO_LETTERS, SPACE, ENTER, SPACER }
+    private enum class Kind {
+        TEXT, SHIFT, DELETE, TO_SYMBOLS_1, TO_SYMBOLS_2, TO_LETTERS, LANG, SPACE, ENTER, SPACER,
+    }
 
     private class Key(val kind: Kind, val label: String = "", val weight: Float = 1f)
 
@@ -44,6 +52,8 @@ class SamKeyboardService : InputMethodService() {
         val accent: Int,
     )
 
+    private class Target(val code: String, val name: String)
+
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var root: LinearLayout
 
@@ -52,27 +62,21 @@ class SamKeyboardService : InputMethodService() {
     private var lastShiftTap = 0L
     private var lastSpaceTap = 0L
 
-    // Dịch
-    private class Lang(val code: String, val name: String)
+    // Gõ tiếng Việt
+    private val telex = TelexEngine()
+    private var vietnamese = true
+    private var telexAllowed = true
 
-    private val languages = listOf(
-        Lang(TranslateLanguage.VIETNAMESE, "Tiếng Việt"),
-        Lang(TranslateLanguage.ENGLISH, "English"),
-        Lang(TranslateLanguage.CHINESE, "中文"),
-        Lang(TranslateLanguage.JAPANESE, "日本語"),
-        Lang(TranslateLanguage.KOREAN, "한국어"),
-        Lang(TranslateLanguage.FRENCH, "Français"),
-        Lang(TranslateLanguage.GERMAN, "Deutsch"),
-        Lang(TranslateLanguage.SPANISH, "Español"),
-        Lang(TranslateLanguage.THAI, "ไทย"),
-        Lang(TranslateLanguage.RUSSIAN, "Русский"),
+    // Dịch
+    private val targets = listOf(
+        Target("en", "English"),
+        Target("zh-TW", "繁體中文"), // 繁體中文
+        Target("my", "မြန်မာ"), // မြန်မာ
     )
     private var translateOpen = false
     private var translateStatus: String? = null
-    private var srcIndex = 0 // Tiếng Việt
-    private var dstIndex = 1 // English
-    private var translator: Translator? = null
-    private var translatorKey = ""
+    private var targetIndex = 0
+    private var translateJob = 0
 
     private val repeatDelete = object : Runnable {
         override fun run() {
@@ -82,6 +86,11 @@ class SamKeyboardService : InputMethodService() {
     }
 
     // ---------------------------------------------------------------- vòng đời
+
+    override fun onCreate() {
+        super.onCreate()
+        vietnamese = prefs().getBoolean("vietnamese", true)
+    }
 
     override fun onCreateInputView(): View {
         root = LinearLayout(this).apply {
@@ -94,6 +103,8 @@ class SamKeyboardService : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        finishTelex()
+        telexAllowed = allowsTelex(info)
         translateStatus = null
         layer = Layer.LETTERS
         shift = if (capsMode() != 0) Shift.ON else Shift.OFF
@@ -102,8 +113,35 @@ class SamKeyboardService : InputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         handler.removeCallbacks(repeatDelete)
+        finishTelex()
         super.onFinishInputView(finishingInput)
     }
+
+    override fun onUpdateSelection(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int,
+    ) {
+        super.onUpdateSelection(
+            oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd,
+        )
+        // Người dùng đưa con trỏ đi chỗ khác: kết thúc từ đang gõ dở.
+        if (!telex.isEmpty &&
+            (candidatesStart == -1 || newSelStart != candidatesEnd || newSelEnd != candidatesEnd)
+        ) {
+            finishTelex()
+        }
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        super.onDestroy()
+    }
+
+    private fun prefs() = getSharedPreferences("samkeyboard", Context.MODE_PRIVATE)
 
     // ---------------------------------------------------------------- bố cục
 
@@ -112,13 +150,18 @@ class SamKeyboardService : InputMethodService() {
     private fun layout(): List<List<Key>> {
         val numbers = "1234567890".map { t(it.toString()) }
         val bottomLetters = listOf(
-            Key(Kind.TO_SYMBOLS_1, "?123", 1.5f), t(","),
-            Key(Kind.SPACE, "English", 5f), t("."),
+            Key(Kind.TO_SYMBOLS_1, "?123", 1.3f),
+            Key(Kind.LANG, "", 1.2f),
+            t(","),
+            Key(Kind.SPACE, "", 4f),
+            t("."),
             Key(Kind.ENTER, "↵", 1.5f),
         )
         val bottomSymbols = listOf(
-            Key(Kind.TO_LETTERS, "ABC", 1.5f), t(","),
-            Key(Kind.SPACE, "English", 5f), t("."),
+            Key(Kind.TO_LETTERS, "ABC", 1.5f),
+            t(","),
+            Key(Kind.SPACE, "", 5f),
+            t("."),
             Key(Kind.ENTER, "↵", 1.5f),
         )
         return when (layer) {
@@ -206,6 +249,13 @@ class SamKeyboardService : InputMethodService() {
             key.label.uppercase()
         } else key.label
 
+    private fun keyLabel(key: Key): String = when {
+        key.kind == Kind.SHIFT && shift == Shift.LOCK -> "⇪"
+        key.kind == Kind.LANG -> if (vietnamese) "VI" else "EN"
+        key.kind == Kind.SPACE -> if (vietnamese) "Tiếng Việt" else "English"
+        else -> displayLabel(key)
+    }
+
     private fun makeKeyView(key: Key, c: Colors): View {
         val params = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, key.weight)
             .apply { setMargins(dp(2), dp(3), dp(2), dp(3)) }
@@ -222,13 +272,12 @@ class SamKeyboardService : InputMethodService() {
             isSpecial -> c.special
             else -> c.key
         }
-        val label = if (key.kind == Kind.SHIFT && shift == Shift.LOCK) "⇪" else displayLabel(key)
 
         return TextView(this).apply {
             layoutParams = params
-            text = label
+            text = keyLabel(key)
             gravity = Gravity.CENTER
-            setTextColor(if (key.kind == Kind.ENTER || (key.kind == Kind.SHIFT && shift != Shift.OFF)) Color.WHITE else c.text)
+            setTextColor(if (isAccent) Color.WHITE else c.text)
             setTextSize(
                 TypedValue.COMPLEX_UNIT_SP,
                 when (key.kind) {
@@ -277,12 +326,58 @@ class SamKeyboardService : InputMethodService() {
         return true
     }
 
+    // ---------------------------------------------------------------- gõ tiếng Việt (Telex)
+
+    private fun allowsTelex(info: EditorInfo?): Boolean {
+        val type = info?.inputType ?: return false
+        if ((type and InputType.TYPE_MASK_CLASS) != InputType.TYPE_CLASS_TEXT) return false
+        val variation = type and InputType.TYPE_MASK_VARIATION
+        return variation != InputType.TYPE_TEXT_VARIATION_PASSWORD &&
+            variation != InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD &&
+            variation != InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD &&
+            variation != InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS &&
+            variation != InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS &&
+            variation != InputType.TYPE_TEXT_VARIATION_URI
+    }
+
+    private fun telexOn(): Boolean = vietnamese && telexAllowed && layer == Layer.LETTERS
+
+    private fun isAsciiLetter(c: Char) = c in 'a'..'z' || c in 'A'..'Z'
+
+    /** Hiển thị từ đang gõ dưới dạng "composing text" (có gạch chân) để còn sửa dấu được. */
+    private fun updateComposing() {
+        val ic = currentInputConnection ?: return
+        if (telex.isEmpty) {
+            ic.commitText("", 1)
+        } else {
+            ic.setComposingText(telex.text(), 1)
+        }
+    }
+
+    /** Chốt từ đang gõ (khi gặp dấu cách, dấu câu, đổi trang phím, ...). */
+    private fun finishTelex() {
+        if (telex.isEmpty) return
+        telex.reset()
+        currentInputConnection?.finishComposingText()
+    }
+
     // ---------------------------------------------------------------- xử lý phím
 
     private fun onKey(key: Key) {
         when (key.kind) {
+            Kind.TEXT, Kind.SHIFT, Kind.DELETE, Kind.SPACER -> Unit
+            else -> finishTelex()
+        }
+        when (key.kind) {
             Kind.TEXT -> {
-                currentInputConnection?.commitText(displayLabel(key), 1)
+                val text = displayLabel(key)
+                if (telexOn() && text.length == 1 && isAsciiLetter(text[0])) {
+                    telex.feed(text[0])
+                    updateComposing()
+                } else {
+                    finishTelex()
+                    currentInputConnection?.commitText(text, 1)
+                }
                 val before = shift
                 if (shift == Shift.ON) shift = Shift.OFF
                 refreshShift(forceRebuild = before != shift)
@@ -290,6 +385,11 @@ class SamKeyboardService : InputMethodService() {
             Kind.SPACE -> onSpace()
             Kind.ENTER -> onEnter()
             Kind.SHIFT -> onShiftTap()
+            Kind.LANG -> {
+                vietnamese = !vietnamese
+                prefs().edit().putBoolean("vietnamese", vietnamese).apply()
+                rebuild()
+            }
             Kind.TO_SYMBOLS_1 -> { layer = Layer.SYMBOLS_1; rebuild() }
             Kind.TO_SYMBOLS_2 -> { layer = Layer.SYMBOLS_2; rebuild() }
             Kind.TO_LETTERS -> {
@@ -314,7 +414,12 @@ class SamKeyboardService : InputMethodService() {
     }
 
     private fun deleteOnce() {
-        sendDownUpKeyEvents(android.view.KeyEvent.KEYCODE_DEL)
+        if (!telex.isEmpty) {
+            telex.backspace()
+            updateComposing()
+            return
+        }
+        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
     }
 
     private fun onSpace() {
@@ -407,18 +512,8 @@ class SamKeyboardService : InputMethodService() {
                 )
             })
         } else {
-            bar.addView(chip(languages[srcIndex].name, 1.5f) {
-                srcIndex = nextLanguage(srcIndex, dstIndex)
-                rebuild()
-            })
-            bar.addView(chip("⇄", 0.8f) {
-                val tmp = srcIndex
-                srcIndex = dstIndex
-                dstIndex = tmp
-                rebuild()
-            })
-            bar.addView(chip(languages[dstIndex].name, 1.5f) {
-                dstIndex = nextLanguage(dstIndex, srcIndex)
+            bar.addView(chip("Dịch sang: " + targets[targetIndex].name, 3f) {
+                targetIndex = (targetIndex + 1) % targets.size
                 rebuild()
             })
             bar.addView(chip(translateStatus ?: "Dịch", 1.6f, accent = true) {
@@ -433,14 +528,6 @@ class SamKeyboardService : InputMethodService() {
         return bar
     }
 
-    private fun nextLanguage(current: Int, other: Int): Int {
-        var i = current
-        do {
-            i = (i + 1) % languages.size
-        } while (i == other)
-        return i
-    }
-
     private fun setStatus(status: String?, clearAfterMs: Long = 0) {
         translateStatus = status
         rebuild()
@@ -452,23 +539,9 @@ class SamKeyboardService : InputMethodService() {
         }
     }
 
-    private fun translatorFor(src: String, dst: String): Translator {
-        val key = "$src>$dst"
-        if (key != translatorKey || translator == null) {
-            translator?.close()
-            translator = Translation.getClient(
-                TranslatorOptions.Builder()
-                    .setSourceLanguage(src)
-                    .setTargetLanguage(dst)
-                    .build(),
-            )
-            translatorKey = key
-        }
-        return translator!!
-    }
-
-    /** Dịch đoạn đang chọn, nếu không chọn gì thì dịch toàn bộ chữ trong ô nhập rồi thay thế. */
+    /** Dịch đoạn đang chọn; nếu không chọn gì thì dịch toàn bộ chữ trong ô nhập rồi thay thế. */
     private fun translateNow() {
+        finishTelex()
         val ic = currentInputConnection ?: return
         val selected = ic.getSelectedText(0)?.toString().orEmpty()
         val useSelection = selected.isNotEmpty()
@@ -480,33 +553,105 @@ class SamKeyboardService : InputMethodService() {
             setStatus("Chưa có chữ", 2000)
             return
         }
+        if (source.length > 4500) {
+            setStatus("Quá dài", 2500)
+            return
+        }
 
+        val job = ++translateJob
+        val target = targets[targetIndex].code
         setStatus("Đang dịch...")
-        val tr = translatorFor(languages[srcIndex].code, languages[dstIndex].code)
-        tr.downloadModelIfNeeded(DownloadConditions.Builder().build())
-            .addOnSuccessListener {
-                tr.translate(source)
-                    .addOnSuccessListener { result ->
-                        val target = currentInputConnection
-                        if (target != null) {
-                            target.beginBatchEdit()
-                            if (!useSelection) {
-                                target.deleteSurroundingText(beforeText.length, afterText.length)
-                            }
-                            target.commitText(result, 1)
-                            target.endBatchEdit()
-                        }
-                        setStatus(null)
-                    }
-                    .addOnFailureListener { setStatus("Lỗi dịch", 2500) }
+
+        Thread {
+            var out: String? = null
+            var err = "Lỗi dịch"
+            try {
+                out = requestTranslation(source, target)
+            } catch (e: UnknownHostException) {
+                err = "Cần mạng"
+            } catch (e: IOException) {
+                err = "Lỗi mạng"
+            } catch (e: Exception) {
+                err = "Lỗi dịch"
             }
-            .addOnFailureListener { setStatus("Cần mạng", 2500) }
+            handler.post {
+                onTranslated(job, out, err, useSelection, beforeText, afterText)
+            }
+        }.start()
     }
 
-    override fun onDestroy() {
-        translator?.close()
-        handler.removeCallbacksAndMessages(null)
-        super.onDestroy()
+    private fun onTranslated(
+        job: Int,
+        out: String?,
+        err: String,
+        useSelection: Boolean,
+        beforeText: String,
+        afterText: String,
+    ) {
+        if (job != translateJob) return
+        if (out.isNullOrEmpty()) {
+            setStatus(err, 2500)
+            return
+        }
+        val ic = currentInputConnection
+        if (ic == null) {
+            setStatus(null)
+            return
+        }
+        if (!useSelection) {
+            // Nếu trong lúc chờ người dùng đã sửa chữ hoặc đổi ô nhập thì thôi, không ghi đè.
+            val nowBefore = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
+            val nowAfter = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
+            if (nowBefore != beforeText || nowAfter != afterText) {
+                setStatus("Đã thay đổi", 2000)
+                return
+            }
+        }
+        ic.beginBatchEdit()
+        if (!useSelection) {
+            ic.deleteSurroundingText(beforeText.length, afterText.length)
+        }
+        ic.commitText(out, 1)
+        ic.endBatchEdit()
+        setStatus(null)
+    }
+
+    /**
+     * Gọi dịch vụ dịch của Google (không cần khóa API), tự nhận diện ngôn ngữ nguồn.
+     * Chữ cần dịch được gửi lên Google khi bấm nút Dịch.
+     */
+    private fun requestTranslation(text: String, target: String): String {
+        val encodedText = URLEncoder.encode(text, "UTF-8")
+        val params = "client=gtx&sl=auto&tl=" + URLEncoder.encode(target, "UTF-8") + "&dt=t"
+        val base = "https://translate.googleapis.com/translate_a/single"
+        val usePost = encodedText.length > 1500
+
+        val url = if (usePost) URL(base) else URL("$base?$params&q=$encodedText")
+        val conn = url.openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = 8000
+            conn.readTimeout = 15000
+            if (usePost) {
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                conn.outputStream.use {
+                    it.write("$params&q=$encodedText".toByteArray(Charsets.UTF_8))
+                }
+            }
+            if (conn.responseCode != 200) throw IOException("HTTP " + conn.responseCode)
+            val json = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val sentences = JSONArray(json).getJSONArray(0)
+            val sb = StringBuilder()
+            for (i in 0 until sentences.length()) {
+                val part = sentences.optJSONArray(i) ?: continue
+                if (part.isNull(0)) continue
+                sb.append(part.optString(0, ""))
+            }
+            return sb.toString()
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun dp(value: Int): Int =

@@ -31,7 +31,4 @@ android {
     }
 }
 
-dependencies {
-    // Dịch trên máy (Google ML Kit). Mỗi ngôn ngữ tải 1 lần (~30MB) rồi dịch offline.
-    implementation("com.google.mlkit:translate:17.0.3")
-}
+// Không dùng thư viện ngoài: app chỉ dùng Android framework.

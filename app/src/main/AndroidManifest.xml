@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Chỉ dùng để tải gói ngôn ngữ dịch lần đầu. Chữ bạn gõ được dịch ngay trên máy. -->
+    <!-- Chỉ dùng khi bấm nút Dịch: gửi đúng đoạn chữ cần dịch lên dịch vụ dịch của Google. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
