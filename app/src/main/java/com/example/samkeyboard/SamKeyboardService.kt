@@ -1,4 +1,4 @@
-﻿package com.example.samkeyboard
+package com.example.samkeyboard
 
 import android.content.Context
 import android.content.res.Configuration
@@ -624,6 +624,13 @@ class SamKeyboardService : InputMethodService() {
         rebuild()
     }
 
+    private fun scheduleTrAutoTranslate() {
+        handler.removeCallbacks(trAutoTranslate)
+        if (translateOpen && trSourceText().isNotBlank()) {
+            handler.postDelayed(trAutoTranslate, 700)
+        }
+    }
+
     private fun buildToolbar(c: Colors): View {
         if (!translateOpen) {
             val bar = LinearLayout(this).apply {
@@ -829,13 +836,7 @@ class SamKeyboardService : InputMethodService() {
         ic.beginBatchEdit()
         try {
             if (trSnapUseSelection) {
-                val sel = ic.getSelectedText(0)?.toString().orEmpty()
-                // Nếu vùng chọn vẫn như lúc mở bảng dịch thì thay thế, ngược lại chèn tại con trỏ
-                if (sel == trSnapSelected) {
-                    ic.commitText(trResult, 1)
-                } else {
-                    ic.commitText(trResult, 1)
-                }
+                ic.commitText(trResult, 1)
             } else {
                 val nowBefore = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
                 val nowAfter = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
