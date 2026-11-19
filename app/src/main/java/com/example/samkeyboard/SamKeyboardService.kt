@@ -56,7 +56,7 @@ import kotlin.math.roundToInt
  *  - Tinh chỉnh (bố cục, chiều cao, lề, khoảng cách phím, theme, màu, âm, sửa lỗi, nổi)
  *    lưu RIÊNG BIỆT cho từng màn hình (trong/ngoài) và từng chiều (dọc/ngang).
  *  - Telex QWERTY (VI/EN), tự sửa chính tả khi bấm dấu cách.
- *  - Dịch: gõ văn bản nguồn trong bảng dịch, bản dịch hiện thẳng (trực tiếp) lên khung chat.
+ *  - Dịch: gõ trực tiếp vào khung chat, bản dịch xem trước trong bảng; Dịch/Enter thay thế nội dung.
  *  - Giọng nói VI (hiện song song) và VI→EN (dịch & hiện lên khung chat; bấm ngắt thu âm sẽ dịch ngay).
  *  - Giao diện iPhone/Samsung, đổi màu, popup mượt, âm thanh gõ.
  */
@@ -144,13 +144,11 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     private var translateStatus: String? = null
     private var targetIndex = 0
     private var translateJob = 0
-    private var trSourceBase = ""
-    private val trSourceTelex = TelexEngine()
-    private var trAnchorBefore = ""
-    private var trAnchorAfter = ""
-    private var trAppliedLen = 0
+    private var trResult = ""
     private var trTranslating = false
-    private var trFinalizing = false
+    private var trPendingApply = false
+    // khi mở: true = chỉ dịch/thay thế vùng chọn lúc đó (nếu còn), false = dịch/thay thế toàn bộ
+    private var trUseSelection = false
 
     // Tự sửa chính tả
     private var scSession: SpellCheckerSession? = null
@@ -901,7 +899,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         popup.animate().cancel()
         popup.text = text
         val wide = isWideScreen()
-        val textSize = if (wide) 68f else 34f
+        val textSize = if (wide) 56f else 34f
         popup.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSize)
         popup.alpha = 0f; popup.scaleX = 0.6f; popup.scaleY = 0.6f; popup.translationY = dp(6).toFloat()
         popup.visibility = View.VISIBLE
@@ -910,8 +908,9 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val lp = popup.layoutParams as FrameLayout.LayoutParams
         val baseW = if (text.length <= 1) 58 else 74
         val baseH = 66
-        lp.width = dp(if (wide) baseW * 2 else baseW)
-        lp.height = dp(if (wide) baseH * 2 else baseH)
+        // màn hình trong: phóng to vừa phải (~1.7 lần) để dễ nhìn nhưng không quá to
+        lp.width = dp(if (wide) (baseW * 1.7f).roundToInt() else baseW)
+        lp.height = dp(if (wide) (baseH * 1.7f).roundToInt() else baseH)
         val locA = IntArray(2); val locC = IntArray(2)
         anchor.getLocationInWindow(locA); container.getLocationInWindow(locC)
         val ax = locA[0] - locC[0] + anchor.width / 2 - lp.width / 2
@@ -1410,89 +1409,24 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         if (shift != before || forceRebuild) rebuild()
     }
 
-    // ---------------------------------------------------------------- bảng dịch (gõ nguồn trong bảng, bản dịch hiện thẳng lên khung chat)
+    // ---------------------------------------------------------------- bảng dịch (gõ vào khung chat, bản dịch xem trước trong bảng)
 
-    private fun trSourceDisplay(): String = trSourceBase + trSourceTelex.text()
-
-    private fun openTranslate() {
-        finishTelex()
-        val ic = currentInputConnection
-        trAnchorBefore = ""
-        trAnchorAfter = ""
-        trAppliedLen = 0
-        trSourceBase = ""
-        trSourceTelex.reset()
-
-        if (ic != null) {
-            try {
-                val req = ExtractedTextRequest().apply { hintMaxChars = 10000; hintMaxLines = 300 }
-                val et = ic.getExtractedText(req, 0)
-                if (et != null && et.text != null) {
-                    val text = et.text.toString()
-                    val selStart = et.selectionStart.coerceIn(0, text.length)
-                    val selEnd = et.selectionEnd.coerceIn(0, text.length)
-                    val a = minOf(selStart, selEnd)
-                    val b = maxOf(selStart, selEnd)
-                    if (a != b) {
-                        trAnchorBefore = text.substring(0, a)
-                        trAnchorAfter = text.substring(b)
-                        trSourceBase = text.substring(a, b)
-                        trAppliedLen = trSourceBase.length
-                    } else {
-                        trAnchorBefore = text.substring(0, a)
-                        trAnchorAfter = text.substring(b)
-                        trSourceBase = ""
-                        trAppliedLen = 0
-                    }
-                } else {
-                    val sel = ic.getSelectedText(0)?.toString().orEmpty()
-                    val before = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
-                    val after = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
-                    if (sel.isNotEmpty()) {
-                        trAnchorBefore = before
-                        trAnchorAfter = after
-                        trSourceBase = sel
-                        trAppliedLen = sel.length
-                    } else {
-                        trAnchorBefore = before
-                        trAnchorAfter = after
-                        trSourceBase = ""
-                        trAppliedLen = 0
-                    }
-                }
-            } catch (_: Exception) {
-                val sel = ic.getSelectedText(0)?.toString().orEmpty()
-                trAnchorBefore = ""
-                trAnchorAfter = ""
-                trSourceBase = sel
-                trAppliedLen = sel.length
-            }
-        }
-
-        trSourceTelex.reset()
-        trTranslating = false
-        trFinalizing = false
-        translateStatus = null
-        translateOpen = true
-        layer = Layer.LETTERS
-        rebuild()
-        val src = trSourceDisplay()
-        if (src.isNotBlank()) {
-            translateNow(auto = false)
-        }
+    private fun currentTranslateSource(): String {
+        val ic = currentInputConnection ?: return ""
+        val sel = ic.getSelectedText(0)?.toString()
+        if (!sel.isNullOrEmpty()) return sel
+        val req = ExtractedTextRequest().apply { hintMaxChars = 10000; hintMaxLines = 300 }
+        val et = ic.getExtractedText(req, 0)
+        if (et != null && et.text != null) return et.text.toString()
+        val before = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
+        val after = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
+        return before + after
     }
 
-    private fun closeTranslate() {
-        handler.removeCallbacks(trAutoTranslate)
-        if (!trSourceTelex.isEmpty) {
-            trSourceBase += trSourceTelex.text()
-            trSourceTelex.reset()
-        }
-        translateJob++
-        translateOpen = false
-        trTranslating = false
-        trFinalizing = false
-        translateStatus = null
+    private fun onTranslateInputChanged(retranslate: Boolean = true) {
+        trResult = ""
+        if (translateStatus != null && !trTranslating) translateStatus = null
+        if (retranslate) scheduleTrAutoTranslate()
         rebuild()
     }
 
@@ -1500,88 +1434,61 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         handler.removeCallbacks(trAutoTranslate)
         translateOpen = false
         trTranslating = false
-        trFinalizing = false
+        trPendingApply = false
         translateStatus = null
-        trSourceBase = ""
-        trSourceTelex.reset()
-        trAnchorBefore = ""
-        trAnchorAfter = ""
-        trAppliedLen = 0
+        trResult = ""
+        trUseSelection = false
         translateJob++
     }
 
-    private fun handleTranslateModeKey(key: Key) {
-        if (key.kind == Kind.ENTER) {
-            if (!trSourceTelex.isEmpty) { trSourceBase += trSourceTelex.text(); trSourceTelex.reset() }
-            trFinalizing = true
+    private fun openTranslate() {
+        finishTelex()
+        val ic = currentInputConnection
+        val sel = ic?.getSelectedText(0)?.toString().orEmpty()
+        trUseSelection = sel.isNotEmpty()
+        trResult = ""
+        translateStatus = null
+        trTranslating = false
+        trPendingApply = false
+        translateOpen = true
+        layer = Layer.LETTERS
+        rebuild()
+        if (currentTranslateSource().isNotBlank()) {
             translateNow(auto = false)
-            return
-        }
-        when (key.kind) {
-            Kind.TEXT -> {
-                val text = displayLabel(key)
-                if (trTelexOn() && text.length == 1 && isAsciiLetter(text[0])) {
-                    trSourceTelex.feed(text[0])
-                } else {
-                    if (!trSourceTelex.isEmpty) { trSourceBase += trSourceTelex.text(); trSourceTelex.reset() }
-                    trSourceBase += text
-                }
-                val before = shift
-                if (shift == Shift.ON) shift = Shift.OFF
-                if (before != shift) rebuild() else onTrSourceChanged()
-            }
-            Kind.SPACE -> {
-                if (!trSourceTelex.isEmpty) { trSourceBase += trSourceTelex.text(); trSourceTelex.reset() }
-                trSourceBase += " "
-                onTrSourceChanged()
-            }
-            Kind.DELETE -> {
-                if (!trSourceTelex.isEmpty) {
-                    trSourceTelex.backspace()
-                } else if (trSourceBase.isNotEmpty()) {
-                    trSourceBase = trSourceBase.dropLast(1)
-                }
-                onTrSourceChanged()
-            }
-            Kind.SHIFT -> {
-                onShiftTap() // rebuilds
-            }
-            Kind.LANG -> {
-                if (!trSourceTelex.isEmpty) { trSourceBase += trSourceTelex.text(); trSourceTelex.reset() }
-                vietnamese = !vietnamese
-                prefs().edit().putBoolean("vietnamese", vietnamese).apply()
-                rebuild()
-            }
-            Kind.TO_SYMBOLS_1 -> { if (!trSourceTelex.isEmpty) { trSourceBase += trSourceTelex.text(); trSourceTelex.reset() }; layer = Layer.SYMBOLS_1; rebuild() }
-            Kind.TO_SYMBOLS_2 -> { if (!trSourceTelex.isEmpty) { trSourceBase += trSourceTelex.text(); trSourceTelex.reset() }; layer = Layer.SYMBOLS_2; rebuild() }
-            Kind.TO_LETTERS -> {
-                if (!trSourceTelex.isEmpty) { trSourceBase += trSourceTelex.text(); trSourceTelex.reset() }
-                layer = Layer.LETTERS
-                if (shift == Shift.OFF && capsMode() != 0) shift = Shift.ON
-                rebuild()
-            }
-            else -> Unit
         }
     }
 
-    private fun trTelexOn(): Boolean = vietnamese && layer == Layer.LETTERS
-
-    private fun onTrSourceChanged() {
+    private fun closeTranslate() {
+        handler.removeCallbacks(trAutoTranslate)
+        translateJob++
+        translateOpen = false
+        trTranslating = false
+        trPendingApply = false
         translateStatus = null
-        scheduleTrAutoTranslate()
+        trResult = ""
+        trUseSelection = false
         rebuild()
     }
 
     private fun scheduleTrAutoTranslate() {
         handler.removeCallbacks(trAutoTranslate)
-        if (translateOpen && trSourceDisplay().isNotBlank()) {
-            handler.postDelayed(trAutoTranslate, 600)
-        } else if (translateOpen) {
-            translateJob++ // hủy kết quả đang chạy
-            trTranslating = false
-            trFinalizing = false
-            translateStatus = null
-            applyTranslationToChat("") // xóa bản dịch nếu nguồn trống
+        if (translateOpen && currentTranslateSource().isNotBlank()) {
+            handler.postDelayed(trAutoTranslate, 700)
+        }
+    }
+
+    /** Gõ trực tiếp vào khung chat; bản dịch xem trước trong bảng; Enter/Dịch sẽ thay thế. */
+    private fun handleTranslateModeKey(key: Key) {
+        if (key.kind == Kind.ENTER) {
+            finishTelex()
+            translateNow(false)
+            return
+        }
+        applyKeyToApp(key)
+        if (key.kind != Kind.SHIFT) {
+            onTranslateInputChanged()
+        } else {
+            onTranslateInputChanged(retranslate = false)
         }
     }
 
@@ -1622,51 +1529,50 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         control.addView(chip("Sang: " + targets[targetIndex].name, 2.3f, c) {
             targetIndex = (targetIndex + 1) % targets.size
             rebuild()
-            if (trSourceDisplay().isNotBlank()) {
-                trFinalizing = true
-                translateNow(auto = false)
-            }
+            if (currentTranslateSource().isNotBlank()) translateNow(auto = false)
         })
         val actionLabel = when {
             trTranslating -> "Đang dịch..."
-            translateStatus != null -> translateStatus!!
+            translateStatus != null && trResult.isEmpty() -> translateStatus!!
             else -> "Dịch"
         }
-        control.addView(chip(actionLabel, 1.1f, c, accent = true) {
-            if (!trSourceTelex.isEmpty) { trSourceBase += trSourceTelex.text(); trSourceTelex.reset() }
-            trFinalizing = true
-            translateNow(auto = false)
-        })
+        control.addView(chip(actionLabel, 1.1f, c, accent = true) { translateNow(auto = false) })
         control.addView(chip("⌨", 0.6f, c) { showKbSettings = !showKbSettings; rebuild() })
         control.addView(chip("✕", 0.6f, c) { closeTranslate() })
         panel.addView(control)
 
-        val srcText = trSourceDisplay()
+        val srcText = currentTranslateSource()
         val srcView = TextView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { setMargins(dp(3), dp(2), dp(3), dp(4)) }
-            text = if (srcText.isEmpty()) "Gõ văn bản cần dịch..." else srcText
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40))
+                .apply { setMargins(dp(3), dp(2), dp(3), dp(2)) }
+            text = if (srcText.isEmpty()) "Nhập văn bản cần dịch (hiện song song lên khung chat)..." else srcText
             setTextColor(if (srcText.isEmpty()) Color.GRAY else c.text)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            gravity = Gravity.TOP or Gravity.START
-            setPadding(dp(10), dp(8), dp(10), dp(8))
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            setPadding(dp(10), dp(6), dp(10), dp(6))
             background = rounded(c.key, panelCornerDp())
-            minHeight = dp(44)
-            maxLines = 4
+            maxLines = 2
         }
         panel.addView(srcView)
 
-        if (translateStatus != null && trTranslating) {
-            val st = TextView(this).apply {
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22))
-                text = "Bản dịch đang hiện trực tiếp trên khung chat..."
-                setTextColor(Color.GRAY)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(10), 0, dp(10), dp(2))
-            }
-            panel.addView(st)
+        val resLabel = when {
+            trTranslating -> "Đang dịch..."
+            trResult.isNotEmpty() -> trResult
+            translateStatus != null -> translateStatus!!
+            else -> "Bản dịch sẽ hiện ở đây"
         }
+        val resView = TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
+                .apply { setMargins(dp(3), dp(2), dp(3), dp(4)) }
+            text = resLabel
+            setTextColor(if (trResult.isNotEmpty() && !trTranslating) c.text else Color.GRAY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = rounded(c.special, panelCornerDp())
+            maxLines = 2
+        }
+        panel.addView(resView)
         return panel
     }
 
@@ -1708,18 +1614,20 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
 
     private fun translateNow(auto: Boolean = false) {
         handler.removeCallbacks(trAutoTranslate)
-        val source = trSourceDisplay()
+        finishTelex()
+        val source = currentTranslateSource()
         if (source.isBlank()) {
-            if (!auto) setTrStatus("Chưa có chữ", 1500)
-            applyTranslationToChat("")
+            if (!auto) setTrStatus("Chưa có chữ", 2000)
             return
         }
-        if (source.length > 4500) { setTrStatus("Quá dài", 2500); trFinalizing = false; return }
+        if (source.length > 4500) { setTrStatus("Quá dài", 2500); return }
 
         val job = ++translateJob
         val target = targets[targetIndex].code
         trTranslating = true
-        if (!auto) translateStatus = "Đang dịch..."
+        trPendingApply = !auto
+        translateStatus = "Đang dịch..."
+        trResult = ""
         rebuild()
 
         Thread {
@@ -1744,52 +1652,45 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     private fun onTrTranslated(job: Int, out: String?, err: String) {
         if (job != translateJob) return
         trTranslating = false
+        val shouldApply = trPendingApply
+        trPendingApply = false
         if (out.isNullOrEmpty()) {
-            translateStatus = err
-            trFinalizing = false
-            rebuild()
+            translateStatus = err; trResult = ""; rebuild()
         } else {
-            translateStatus = null
-            applyTranslationToChat(out)
-            if (trFinalizing) {
-                trFinalizing = false
-                closeTranslate()
-            } else {
-                rebuild()
-            }
+            trResult = out; translateStatus = null
+            if (shouldApply) applyTranslation() else rebuild()
         }
     }
 
-    /** Thay thế vùng đang dịch trong khung chat bằng bản dịch (hiện thẳng). */
-    private fun applyTranslationToChat(translated: String) {
-        val ic = currentInputConnection ?: return
+    /** Thay thế nội dung đang dịch trong khung chat bằng bản dịch. */
+    private fun applyTranslation() {
+        if (trResult.isEmpty()) { setTrStatus("Chưa có bản dịch", 1500); return }
+        val ic = currentInputConnection ?: run { setTrStatus("Không thể chèn", 1500); return }
         ic.beginBatchEdit()
         try {
             ic.finishComposingText()
-            // chọn vùng [trAnchorBefore.length, trAnchorBefore.length + trAppliedLen] và thay thế
-            val start = trAnchorBefore.length
-            val end = start + trAppliedLen
-            val ok = try { ic.setSelection(start, end); true } catch (_: Exception) { false }
-            if (ok) {
-                ic.commitText(translated, 1)
+            val sel = ic.getSelectedText(0)?.toString()
+            if (!sel.isNullOrEmpty() && trUseSelection) {
+                ic.commitText(trResult, 1)
             } else {
-                // fallback: đặt lại toàn bộ
-                try {
-                    val req = ExtractedTextRequest().apply { hintMaxChars = 100000 }
-                    val et = ic.getExtractedText(req, 0)
-                    val fullLen = et?.text?.length ?: (trAnchorBefore.length + trAppliedLen + trAnchorAfter.length)
-                    ic.setSelection(0, fullLen)
-                    ic.commitText(trAnchorBefore + translated + trAnchorAfter, 1)
-                    ic.setSelection(trAnchorBefore.length + translated.length, trAnchorBefore.length + translated.length)
-                } catch (_: Exception) {
-                    ic.commitText(translated, 1)
+                val req = ExtractedTextRequest().apply { hintMaxChars = 100000 }
+                val et = ic.getExtractedText(req, 0)
+                if (et != null && et.text != null) {
+                    ic.setSelection(0, et.text.length)
+                    ic.commitText(trResult, 1)
+                } else {
+                    val beforeLen = ic.getTextBeforeCursor(10000, 0)?.length ?: 0
+                    val afterLen = ic.getTextAfterCursor(10000, 0)?.length ?: 0
+                    ic.deleteSurroundingText(beforeLen, afterLen)
+                    ic.commitText(trResult, 1)
                 }
             }
-            trAppliedLen = translated.length
         } finally {
             ic.endBatchEdit()
         }
+        closeTranslate()
     }
+
 
     private fun requestTranslation(text: String, target: String): String {
         val encodedText = URLEncoder.encode(text, "UTF-8")

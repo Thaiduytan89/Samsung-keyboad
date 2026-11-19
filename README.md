@@ -6,7 +6,7 @@ Bàn phím Android (giao diện kiểu iPhone/Samsung), viết bằng Kotlin. Kh
 
 - **Giao diện**: chọn kiểu **iPhone** (mặc định) hoặc **Samsung** trong bảng tinh chỉnh (⌨).
 - **Đổi màu bàn phím**: nhiều tông màu (Mặc định, Xanh dương, Xanh lá, Xanh ngọc, Tím, Hồng, Cam, Xám), áp dụng cho cả iPhone & Samsung, tự theo sáng/tối hệ thống.
-- **Popup ký tự** hiện lên khi nhấn phím với hiệu ứng hiện/ẩn mượt (kiểu iPhone). Trên **màn hình trong** popup được **phóng to gấp đôi** (khung và chữ to gấp 2) để dễ nhìn khi gõ hai tay.
+- **Popup ký tự** hiện lên khi nhấn phím với hiệu ứng hiện/ẩn mượt (kiểu iPhone). Trên **màn hình trong** popup được **phóng to vừa phải (~1.7 lần**, chữ 56sp) để dễ nhìn khi gõ hai tay mà không quá to.
 - Phản hồi **rung/haptic** và **âm thanh gõ** khi gõ phím (âm thanh có nhiều lựa chọn).
 - Bố cục QWERTY.
 - **Shift**: chạm 1 lần = viết hoa 1 chữ, chạm đúp = Caps Lock.
@@ -64,10 +64,10 @@ Bàn phím Android (giao diện kiểu iPhone/Samsung), viết bằng Kotlin. Kh
 
 Bấm nút **Dịch** trên thanh phía trên bàn phím:
 
-- Khi mở bảng **Dịch**, bạn **gõ trực tiếp vào ô văn bản trong bảng**; bản dịch sẽ **hiện thẳng, song song lên khung chat/ô nhập** của ứng dụng ngay khi bạn gõ (không có ô “Bản dịch sẽ hiện ở đây” riêng — mọi kết quả đều đẩy thẳng lên khung chat). Telex tiếng Việt vẫn hoạt động trong ô này.
+- Khi mở bảng **Dịch**, bạn **gõ trực tiếp vào khung chat/ô nhập** như bình thường (Telex tiếng Việt vẫn hoạt động); bản dịch được **xem trước trong ô “Bản dịch sẽ hiện ở đây”** của bảng, không tự động đẩy/ghi đè lên khung chat.
 - Khi đang soạn văn bản (chưa gửi), bấm **Dịch** sẽ lấy nội dung đang gõ/đang chọn, **dịch và thay thế trực tiếp** vào khung chat/ô nhập.
 - Bấm **Sang: ...** để đổi ngôn ngữ đích giữa English, 繁體中文 (Hoa phồn thể), မြန်မာ (Myanmar) — sẽ dịch và thay thế trực tiếp.
-- Bấm **Dịch** (hoặc phím **Enter/return**) để dịch và thay thế trực tiếp vào khung chat/ô nhập.
+- Bấm **Dịch** (hoặc phím **Enter/return**) để chốt bản dịch, **thay thế nội dung trong khung chat** và tự đóng bảng.
 - Bấm **✕** để đóng bảng dịch.
 - Tự nhận diện ngôn ngữ nguồn.
 - **Cần có mạng.** Khi dịch, đoạn chữ cần dịch được gửi lên dịch vụ dịch của Google. Bàn phím không gửi gì khác.
@@ -86,7 +86,7 @@ Muốn có file APK để gửi cho máy khác: menu **Build > Build Bundle(s) /
 
 ## Cấu trúc code
 
-- `app/src/main/java/com/example/samkeyboard/SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, popup, xử lý gõ, bảng dịch song song, tách đôi/nổi/chiều cao, theme/màu, âm thanh, tinh chỉnh lề/khoảng cách riêng từng màn hình & chiều, dãy số, dấu cách liền, tự sửa chính tả, nhập liệu giọng nói song song, tối ưu gập/mở)
+- `app/src/main/java/com/example/samkeyboard/SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, popup, xử lý gõ, bảng dịch xem trước + thay thế, tách đôi/nổi/chiều cao, theme/màu, âm thanh, tinh chỉnh lề/khoảng cách riêng từng màn hình & chiều, dãy số, dấu cách liền, tự sửa chính tả, nhập liệu giọng nói song song, tối ưu gập/mở)
 - `app/src/main/java/com/example/samkeyboard/TelexEngine.kt`: bộ gõ Telex (QWERTY)
 - `app/src/main/java/com/example/samkeyboard/SettingsActivity.kt`: màn hình hướng dẫn bật bàn phím
 - `app/src/main/res/xml/method.xml`: khai báo bàn phím với hệ thống
