@@ -1,4 +1,4 @@
-package com.example.samkeyboard
+﻿package com.example.samkeyboard
 
 import android.content.Context
 import android.content.res.Configuration
@@ -22,6 +22,7 @@ import android.widget.TextView
 import org.json.JSONArray
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.net.UnknownHostException
@@ -29,7 +30,7 @@ import java.net.UnknownHostException
 /**
  * Bàn phím QWERTY kiểu Samsung:
  *  - Chuyển đổi English / Tiếng Việt (gõ Telex) bằng phím EN/VI
- *  - Dịch sang English, 繁體中文, မြန်မာ
+ *  - Dịch sang English, 繁體中文, မြန်မာ (có ô nhập riêng trong bảng dịch, kiểu Gboard/Samsung)
  *  - Shift (chạm đúp = Caps Lock), giữ phím xóa để xóa liên tục, tự viết hoa đầu câu,
  *    chạm đúp dấu cách = ". ", 2 trang ký hiệu, giao diện sáng/tối theo hệ thống.
  */
@@ -78,12 +79,24 @@ class SamKeyboardService : InputMethodService() {
     private var targetIndex = 0
     private var translateJob = 0
 
+    // Bảng dịch có ô nhập riêng (giống Gboard/Samsung): gõ và dịch ngay trong bàn phím
+    private var trCommitted = ""
+    private val trTelex = TelexEngine()
+    private var trResult = ""
+    private var trTranslating = false
+    private var trSnapUseSelection = false
+    private var trSnapSelected = ""
+    private var trSnapBefore = ""
+    private var trSnapAfter = ""
+
     private val repeatDelete = object : Runnable {
         override fun run() {
             deleteOnce()
             handler.postDelayed(this, 45)
         }
     }
+
+    private val trAutoTranslate = Runnable { translateNow(auto = true) }
 
     // ---------------------------------------------------------------- vòng đời
 
@@ -106,6 +119,7 @@ class SamKeyboardService : InputMethodService() {
         finishTelex()
         telexAllowed = allowsTelex(info)
         translateStatus = null
+        resetTranslateState()
         layer = Layer.LETTERS
         shift = if (capsMode() != 0) Shift.ON else Shift.OFF
         rebuild()
@@ -114,6 +128,7 @@ class SamKeyboardService : InputMethodService() {
     override fun onFinishInputView(finishingInput: Boolean) {
         handler.removeCallbacks(repeatDelete)
         finishTelex()
+        resetTranslateState()
         super.onFinishInputView(finishingInput)
     }
 
@@ -341,6 +356,7 @@ class SamKeyboardService : InputMethodService() {
     }
 
     private fun telexOn(): Boolean = vietnamese && telexAllowed && layer == Layer.LETTERS
+    private fun trTelexOn(): Boolean = vietnamese && layer == Layer.LETTERS
 
     private fun isAsciiLetter(c: Char) = c in 'a'..'z' || c in 'A'..'Z'
 
@@ -364,6 +380,10 @@ class SamKeyboardService : InputMethodService() {
     // ---------------------------------------------------------------- xử lý phím
 
     private fun onKey(key: Key) {
+        if (translateOpen) {
+            onTranslateKey(key)
+            return
+        }
         when (key.kind) {
             Kind.TEXT, Kind.SHIFT, Kind.DELETE, Kind.SPACER -> Unit
             else -> finishTelex()
@@ -473,94 +493,291 @@ class SamKeyboardService : InputMethodService() {
         if (shift != before || forceRebuild) rebuild()
     }
 
-    // ---------------------------------------------------------------- dịch
+    // ---------------------------------------------------------------- bảng dịch (giống Gboard/Samsung)
 
-    private fun buildToolbar(c: Colors): View {
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
-            )
+    private fun trSourceText(): String = trCommitted + trTelex.text()
+
+    private fun finishTrTelex() {
+        if (!trTelex.isEmpty) {
+            trCommitted += trTelex.text()
+            trTelex.reset()
         }
+    }
 
-        fun chip(label: String, weight: Float, accent: Boolean = false, onClick: () -> Unit): View =
-            TextView(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.MATCH_PARENT, weight,
-                ).apply { setMargins(dp(2), dp(3), dp(2), dp(5)) }
-                this.text = label
-                gravity = Gravity.CENTER
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setTextColor(if (accent) Color.WHITE else c.text)
-                background = rounded(if (accent) c.accent else c.special)
-                setOnClickListener {
-                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    onClick()
+    private fun resetTranslateState() {
+        handler.removeCallbacks(trAutoTranslate)
+        translateOpen = false
+        trTranslating = false
+        translateStatus = null
+        trResult = ""
+        trCommitted = ""
+        trTelex.reset()
+        trSnapUseSelection = false
+        trSnapSelected = ""
+        trSnapBefore = ""
+        trSnapAfter = ""
+        translateJob++
+    }
+
+    private fun openTranslate() {
+        finishTelex()
+        val ic = currentInputConnection
+        val selected = ic?.getSelectedText(0)?.toString().orEmpty()
+        val before = ic?.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
+        val after = ic?.getTextAfterCursor(5000, 0)?.toString().orEmpty()
+        trSnapUseSelection = selected.isNotEmpty()
+        trSnapSelected = selected
+        trSnapBefore = before
+        trSnapAfter = after
+        val source = if (trSnapUseSelection) selected else before + after
+        trCommitted = source
+        trTelex.reset()
+        trResult = ""
+        translateStatus = null
+        trTranslating = false
+        translateOpen = true
+        layer = Layer.LETTERS
+        rebuild()
+        if (source.isNotBlank()) {
+            translateNow(auto = true)
+        }
+    }
+
+    private fun closeTranslate() {
+        finishTrTelex()
+        handler.removeCallbacks(trAutoTranslate)
+        translateJob++
+        translateOpen = false
+        trTranslating = false
+        translateStatus = null
+        trResult = ""
+        trCommitted = ""
+        trTelex.reset()
+        rebuild()
+    }
+
+    private fun onTranslateKey(key: Key) {
+        when (key.kind) {
+            Kind.TEXT -> {
+                val text = displayLabel(key)
+                if (trTelexOn() && text.length == 1 && isAsciiLetter(text[0])) {
+                    trTelex.feed(text[0])
+                } else {
+                    finishTrTelex()
+                    trCommitted += text
+                }
+                if (shift == Shift.ON) shift = Shift.OFF
+            }
+            Kind.SPACE -> {
+                finishTrTelex()
+                val now = SystemClock.uptimeMillis()
+                if (now - lastSpaceTap < 400 && trCommitted.endsWith(" ") && trCommitted.length >= 2 &&
+                    trCommitted[trCommitted.length - 2].isLetterOrDigit()
+                ) {
+                    trCommitted = trCommitted.dropLast(1) + ". "
+                    lastSpaceTap = 0
+                } else {
+                    trCommitted += " "
+                    lastSpaceTap = now
                 }
             }
+            Kind.ENTER -> {
+                finishTrTelex()
+                translateNow()
+                return
+            }
+            Kind.DELETE -> {
+                if (!trTelex.isEmpty) {
+                    trTelex.backspace()
+                } else if (trCommitted.isNotEmpty()) {
+                    trCommitted = trCommitted.dropLast(1)
+                }
+            }
+            Kind.SHIFT -> {
+                onShiftTap()
+                return
+            }
+            Kind.LANG -> {
+                finishTrTelex()
+                vietnamese = !vietnamese
+                prefs().edit().putBoolean("vietnamese", vietnamese).apply()
+            }
+            Kind.TO_SYMBOLS_1 -> {
+                finishTrTelex()
+                layer = Layer.SYMBOLS_1
+            }
+            Kind.TO_SYMBOLS_2 -> {
+                finishTrTelex()
+                layer = Layer.SYMBOLS_2
+            }
+            Kind.TO_LETTERS -> {
+                finishTrTelex()
+                layer = Layer.LETTERS
+                if (shift == Shift.OFF && capsMode() != 0) shift = Shift.ON
+            }
+            Kind.SPACER -> return
+        }
+        trResult = ""
+        if (translateStatus != null && !trTranslating) translateStatus = null
+        refreshShift()
+        scheduleTrAutoTranslate()
+        rebuild()
+    }
 
+    private fun buildToolbar(c: Colors): View {
         if (!translateOpen) {
-            bar.addView(chip("Dịch", 1.6f) {
-                translateOpen = true
-                translateStatus = null
-                rebuild()
-            })
+            val bar = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
+                )
+            }
+            bar.addView(chip("Dịch", 1.6f, c) { openTranslate() })
             bar.addView(View(this).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.MATCH_PARENT, 6f,
                 )
             })
-        } else {
-            bar.addView(chip("Dịch sang: " + targets[targetIndex].name, 3f) {
-                targetIndex = (targetIndex + 1) % targets.size
-                rebuild()
-            })
-            bar.addView(chip(translateStatus ?: "Dịch", 1.6f, accent = true) {
-                translateNow()
-            })
-            bar.addView(chip("✕", 0.8f) {
-                translateOpen = false
-                translateStatus = null
-                rebuild()
-            })
+            return bar
         }
-        return bar
+        return buildTranslatePanel(c)
     }
 
-    private fun setStatus(status: String?, clearAfterMs: Long = 0) {
+    private fun buildTranslatePanel(c: Colors): View {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+
+        val control = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40),
+            )
+        }
+        control.addView(chip("Sang: " + targets[targetIndex].name, 2.6f, c) {
+            targetIndex = (targetIndex + 1) % targets.size
+            rebuild()
+            if (trSourceText().isNotBlank()) translateNow()
+        })
+        val actionLabel = when {
+            trTranslating -> "Đang dịch..."
+            translateStatus != null && trResult.isEmpty() -> translateStatus!!
+            else -> "Dịch"
+        }
+        control.addView(chip(actionLabel, 1.4f, c, accent = true) { translateNow() })
+        control.addView(chip("✕", 0.7f, c) { closeTranslate() })
+        panel.addView(control)
+
+        val srcText = trSourceText()
+        val srcView = TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
+            ).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) }
+            text = if (srcText.isEmpty()) "Nhập văn bản cần dịch..." else srcText
+            setTextColor(if (srcText.isEmpty()) Color.GRAY else c.text)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = rounded(c.key)
+            maxLines = 2
+        }
+        panel.addView(srcView)
+
+        val resultRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(42),
+            )
+        }
+        val resLabel = when {
+            trTranslating -> "Đang dịch..."
+            trResult.isNotEmpty() -> trResult
+            translateStatus != null -> translateStatus!!
+            else -> "Bản dịch sẽ hiện ở đây"
+        }
+        resultRow.addView(TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.MATCH_PARENT, 3.2f,
+            ).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) }
+            text = resLabel
+            setTextColor(
+                if (trResult.isNotEmpty() && !trTranslating) c.text else Color.GRAY
+            )
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = rounded(c.special)
+            maxLines = 2
+        })
+        resultRow.addView(
+            chip("Thay thế", 1.3f, c, accent = trResult.isNotEmpty()) { applyTranslation() }
+        )
+        panel.addView(resultRow)
+
+        return panel
+    }
+
+    private fun chip(
+        label: String, weight: Float, c: Colors, accent: Boolean = false, onClick: () -> Unit,
+    ): View = TextView(this).apply {
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight)
+            .apply { setMargins(dp(2), dp(3), dp(2), dp(5)) }
+        text = label
+        gravity = Gravity.CENTER
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        setTextColor(if (accent) Color.WHITE else c.text)
+        background = rounded(if (accent) c.accent else c.special)
+        isClickable = true
+        setOnClickListener {
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            onClick()
+        }
+    }
+
+    private fun setTrStatus(status: String?, clearAfterMs: Long = 0) {
         translateStatus = status
+        trTranslating = false
         rebuild()
         if (clearAfterMs > 0) {
+            val snapshot = status
             handler.postDelayed({
-                translateStatus = null
-                rebuild()
+                if (translateStatus == snapshot) {
+                    translateStatus = null
+                    rebuild()
+                }
             }, clearAfterMs)
         }
     }
 
-    /** Dịch đoạn đang chọn; nếu không chọn gì thì dịch toàn bộ chữ trong ô nhập rồi thay thế. */
-    private fun translateNow() {
-        finishTelex()
-        val ic = currentInputConnection ?: return
-        val selected = ic.getSelectedText(0)?.toString().orEmpty()
-        val useSelection = selected.isNotEmpty()
-        val beforeText = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
-        val afterText = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
-        val source = if (useSelection) selected else beforeText + afterText
-
+    /**
+     * Dịch nội dung trong ô nhập của bảng dịch (tự nhận diện ngôn ngữ nguồn).
+     * Khi mở bảng dịch sẽ tự lấy và dịch văn bản đang soạn/chọn trong ô nhập.
+     */
+    private fun translateNow(auto: Boolean = false) {
+        handler.removeCallbacks(trAutoTranslate)
+        finishTrTelex()
+        val source = trSourceText()
         if (source.isBlank()) {
-            setStatus("Chưa có chữ", 2000)
+            if (!auto) setTrStatus("Chưa có chữ", 2000)
             return
         }
         if (source.length > 4500) {
-            setStatus("Quá dài", 2500)
+            setTrStatus("Quá dài", 2500)
             return
         }
 
         val job = ++translateJob
         val target = targets[targetIndex].code
-        setStatus("Đang dịch...")
+        trTranslating = true
+        translateStatus = "Đang dịch..."
+        trResult = ""
+        rebuild()
 
         Thread {
             var out: String? = null
@@ -568,52 +785,71 @@ class SamKeyboardService : InputMethodService() {
             try {
                 out = requestTranslation(source, target)
             } catch (e: UnknownHostException) {
-                err = "Cần mạng"
+                err = "Không có mạng"
+            } catch (e: SocketTimeoutException) {
+                err = "Hết thời gian, thử lại"
             } catch (e: IOException) {
-                err = "Lỗi mạng"
+                val msg = e.message.orEmpty()
+                err = when {
+                    msg.contains("HTTP 429") -> "Bị giới hạn, thử lại sau"
+                    msg.startsWith("HTTP") -> "Lỗi máy chủ, thử lại"
+                    else -> "Lỗi mạng, thử lại"
+                }
             } catch (e: Exception) {
                 err = "Lỗi dịch"
             }
-            handler.post {
-                onTranslated(job, out, err, useSelection, beforeText, afterText)
-            }
+            handler.post { onTrTranslated(job, out, err) }
         }.start()
     }
 
-    private fun onTranslated(
-        job: Int,
-        out: String?,
-        err: String,
-        useSelection: Boolean,
-        beforeText: String,
-        afterText: String,
-    ) {
+    private fun onTrTranslated(job: Int, out: String?, err: String) {
         if (job != translateJob) return
+        trTranslating = false
         if (out.isNullOrEmpty()) {
-            setStatus(err, 2500)
+            translateStatus = err
+            trResult = ""
+        } else {
+            translateStatus = null
+            trResult = out
+        }
+        rebuild()
+    }
+
+    /** Thay thế văn bản trong ô nhập của ứng dụng bằng bản dịch. */
+    private fun applyTranslation() {
+        if (trResult.isEmpty()) {
+            setTrStatus("Chưa có bản dịch", 1500)
             return
         }
         val ic = currentInputConnection
         if (ic == null) {
-            setStatus(null)
+            setTrStatus("Không thể chèn", 1500)
             return
         }
-        if (!useSelection) {
-            // Nếu trong lúc chờ người dùng đã sửa chữ hoặc đổi ô nhập thì thôi, không ghi đè.
-            val nowBefore = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
-            val nowAfter = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
-            if (nowBefore != beforeText || nowAfter != afterText) {
-                setStatus("Đã thay đổi", 2000)
-                return
-            }
-        }
         ic.beginBatchEdit()
-        if (!useSelection) {
-            ic.deleteSurroundingText(beforeText.length, afterText.length)
+        try {
+            if (trSnapUseSelection) {
+                val sel = ic.getSelectedText(0)?.toString().orEmpty()
+                // Nếu vùng chọn vẫn như lúc mở bảng dịch thì thay thế, ngược lại chèn tại con trỏ
+                if (sel == trSnapSelected) {
+                    ic.commitText(trResult, 1)
+                } else {
+                    ic.commitText(trResult, 1)
+                }
+            } else {
+                val nowBefore = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
+                val nowAfter = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
+                if (nowBefore == trSnapBefore && nowAfter == trSnapAfter) {
+                    ic.deleteSurroundingText(nowBefore.length, nowAfter.length)
+                    ic.commitText(trResult, 1)
+                } else {
+                    ic.commitText(trResult, 1)
+                }
+            }
+        } finally {
+            ic.endBatchEdit()
         }
-        ic.commitText(out, 1)
-        ic.endBatchEdit()
-        setStatus(null)
+        closeTranslate()
     }
 
     /**
@@ -629,17 +865,24 @@ class SamKeyboardService : InputMethodService() {
         val url = if (usePost) URL(base) else URL("$base?$params&q=$encodedText")
         val conn = url.openConnection() as HttpURLConnection
         try {
-            conn.connectTimeout = 8000
+            conn.instanceFollowRedirects = true
+            conn.connectTimeout = 10000
             conn.readTimeout = 15000
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+            conn.setRequestProperty("Accept", "*/*")
             if (usePost) {
                 conn.requestMethod = "POST"
                 conn.doOutput = true
-                conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                conn.setRequestProperty(
+                    "Content-Type",
+                    "application/x-www-form-urlencoded; charset=UTF-8",
+                )
                 conn.outputStream.use {
                     it.write("$params&q=$encodedText".toByteArray(Charsets.UTF_8))
                 }
             }
-            if (conn.responseCode != 200) throw IOException("HTTP " + conn.responseCode)
+            val code = conn.responseCode
+            if (code != 200) throw IOException("HTTP $code")
             val json = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
             val sentences = JSONArray(json).getJSONArray(0)
             val sb = StringBuilder()
@@ -648,7 +891,9 @@ class SamKeyboardService : InputMethodService() {
                 if (part.isNull(0)) continue
                 sb.append(part.optString(0, ""))
             }
-            return sb.toString()
+            val result = sb.toString()
+            if (result.isEmpty()) throw IOException("empty")
+            return result
         } finally {
             conn.disconnect()
         }

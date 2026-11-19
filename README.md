@@ -1,4 +1,4 @@
-# SamKeyboard
+﻿# SamKeyboard
 
 Bàn phím Android kiểu Samsung, viết bằng Kotlin. Không quảng cáo, không thu thập dữ liệu.
 
@@ -14,11 +14,14 @@ Phím **VI / EN** ở hàng dưới cùng để chuyển giữa tiếng Việt (
 
 ## Dịch
 
-Bấm nút **Dịch** trên thanh phía trên bàn phím:
-- Chạm "Dịch sang: ..." để đổi giữa English, 繁體中文 (Hoa phồn thể), မြန်မာ (Myanmar), rồi bấm **Dịch**.
-- Tự nhận diện ngôn ngữ đang gõ.
-- Có bôi đen đoạn chữ thì chỉ dịch đoạn đó, không thì dịch toàn bộ chữ trong ô rồi thay thế.
-- Cần có mạng. Khi bấm Dịch, đoạn chữ cần dịch được gửi lên dịch vụ dịch của Google. Bàn phím không gửi gì khác.
+Bấm nút **Dịch** trên thanh phía trên bàn phím để mở bảng dịch (kiểu Gboard/Samsung Keyboard):
+
+- Có ô **nhập văn bản cần dịch** ngay trong bảng dịch: bạn có thể gõ, sửa, xóa trực tiếp bằng bàn phím.
+- Khi đang soạn văn bản (chưa gửi), bấm **Dịch** sẽ tự lấy nội dung đang gõ/đang chọn và dịch ngay.
+- Bấm **Sang: ...** để đổi ngôn ngữ đích giữa English, 繁體中文 (Hoa phồn thể), မြန်မာ (Myanmar).
+- Bấm **Dịch** (hoặc phím Enter) để dịch lại; bấm **Thay thế** để chèn bản dịch vào ô nhập (thay văn bản đang soạn/đang chọn nếu phù hợp).
+- Tự nhận diện ngôn ngữ nguồn.
+- Cần có mạng. Khi dịch, đoạn chữ cần dịch được gửi lên dịch vụ dịch của Google. Bàn phím không gửi gì khác.
 - Lưu ý: app dùng đường dẫn dịch không chính thức của Google (không cần khóa API), nên có thể bị giới hạn hoặc ngừng hoạt động.
 
 ## Tính năng
@@ -46,6 +49,7 @@ Muốn có file APK để gửi cho máy khác: menu **Build > Build Bundle(s) /
 
 ## Cấu trúc code
 
-- `SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, xử lý gõ)
+- `SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, xử lý gõ, bảng dịch)
+- `TelexEngine.kt`: bộ gõ Telex
 - `SettingsActivity.kt`: màn hình hướng dẫn bật bàn phím
 - `res/xml/method.xml`: khai báo bàn phím với hệ thống
