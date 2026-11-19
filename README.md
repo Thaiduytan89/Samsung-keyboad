@@ -16,14 +16,23 @@ Bàn phím Android (giao diện kiểu iPhone), viết bằng Kotlin. Không qu�
 - Nút **return** tự đổi theo ô nhập (Go, Tìm, Gửi, Tiếp, Xong, ...).
 - Phím **VI / EN** để chuyển giữa tiếng Việt (Telex) và tiếng Anh, có nhớ lựa chọn.
 
-## Bố cục: tách rời & chiều cao (tối ưu gập/mở)
+## Bố cục theo màn hình gập/mở (Oppo Find N5)
+
+- **Màn hình trong (mở ra, màn hình lớn)**: tự động dùng **bàn phím tách đôi sang 2 bên** (có khoảng trống ở giữa) để tiện gõ 2 tay.
+- **Màn hình ngoài (gập lại, màn hình nhỏ)**: tự động dùng **bàn phím bình thường** (gộp, full chiều ngang).
+- Bàn phím tự chuyển khi bạn gập/mở máy.
+
+### Tinh chỉnh (nút ⌨)
 
 Bấm nút **⌨** trên thanh công cụ để mở bảng tinh chỉnh:
 
-- **Tách rời / Gộp**: chuyển giữa bàn phím cố định (gộp, đáy màn hình) và **bàn phím tách rời/nổi**.
-- **Chế độ tách rời**: kéo thanh **“⠿ Kéo để di chuyển bàn phím”** để đặt vị trí bất kỳ, dùng nút ← → ↑ ↓ để dịch nhẹ, **Rộng −/+** để đổi độ rộng. Vị trí/kích thước/chiều cao được lưu lại.
-- **Chiều cao**: nút **Cao − / +** để tăng giảm chiều cao phím (lưu lại).
-- **Tối ưu cho Oppo Find N5 (màn hình trong & ngoài)**: tự điều chỉnh khi gập/mở hoặc đổi cấu hình (giới hạn bề ngang và canh lề hợp lý trên màn hình trong rộng, thu gọn lề/chiều cao phù hợp trên màn hình ngoài hẹp) để gõ thoải mái ở cả hai màn hình.
+- **Trên màn hình trong**: chọn kiểu bố cục **Bình thường / Tách đôi / Nổi**.
+  - **Tách đôi** (mặc định): hai nửa bàn phím tách sang hai bên.
+  - **Nổi**: bàn phím nổi có thể di chuyển (kéo thanh “⠿ Kéo để di chuyển bàn phím”, dùng nút ← → ↑ ↓ và **Rộng −/+** để chỉnh vị trí/độ rộng).
+  - **Bình thường**: bàn phím liền, full chiều ngang.
+- **Chiều cao**: nút **Cao − / +** để tăng giảm chiều cao phím.
+- **Trên màn hình ngoài**: luôn dùng bàn phím bình thường (có thể chỉnh chiều cao).
+- Kiểu bố cục, chiều cao, vị trí/kích thước (chế độ nổi) được lưu lại.
 
 ## Gõ tiếng Việt (Telex)
 
@@ -59,7 +68,7 @@ Muốn có file APK để gửi cho máy khác: menu **Build > Build Bundle(s) /
 
 ## Cấu trúc code
 
-- `app/src/main/java/com/example/samkeyboard/SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, popup, xử lý gõ, bảng dịch, chế độ tách rời/chiều cao)
+- `app/src/main/java/com/example/samkeyboard/SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, popup, xử lý gõ, bảng dịch, tách đôi/nổi/chiều cao, tối ưu gập/mở)
 - `app/src/main/java/com/example/samkeyboard/TelexEngine.kt`: bộ gõ Telex
 - `app/src/main/java/com/example/samkeyboard/SettingsActivity.kt`: màn hình hướng dẫn bật bàn phím
 - `app/src/main/res/xml/method.xml`: khai báo bàn phím với hệ thống

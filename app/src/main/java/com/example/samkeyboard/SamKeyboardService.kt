@@ -33,12 +33,11 @@ import kotlin.math.roundToInt
 
 /**
  * Bàn phím QWERTY (giao diện kiểu iPhone) tối ưu cho màn hình gập (Oppo Find N5 trong/ngoài):
+ *  - Màn hình trong (rộng): bàn phím tách đôi sang 2 bên để gõ 2 tay.
+ *  - Màn hình ngoài (gập lại): giao diện bàn phím bình thường.
  *  - Chuyển đổi English / Tiếng Việt (gõ Telex) bằng phím VI/EN
  *  - Dịch sang English, 繁體中文, မြန်မာ: bấm Dịch để dịch và thay thế trực tiếp vào ô chat
- *  - Chế độ Gộp (cố định) / Tách rời (nổi, có thể kéo di chuyển), tinh chỉnh chiều cao phím
- *  - Shift (chạm đúp = Caps Lock), giữ phím xóa để xóa liên tục, tự viết hoa đầu câu,
- *    chạm đúp dấu cách = ". ", 2 trang ký hiệu, giao diện sáng/tối theo hệ thống.
- *  - Popup phím và phản hồi rung khi gõ.
+ *  - Tùy chỉnh chiều cao phím, popup phím và phản hồi rung khi gõ.
  */
 class SamKeyboardService : InputMethodService() {
 
@@ -47,7 +46,7 @@ class SamKeyboardService : InputMethodService() {
     private enum class Kind {
         TEXT, SHIFT, DELETE, TO_SYMBOLS_1, TO_SYMBOLS_2, TO_LETTERS, LANG, SPACE, ENTER, SPACER,
     }
-    private enum class KbMode { DOCKED, FLOATING }
+    private enum class KbLayout { NORMAL, SPLIT, FLOATING }
 
     private class Key(val kind: Kind, val label: String = "", val weight: Float = 1f)
 
@@ -78,11 +77,11 @@ class SamKeyboardService : InputMethodService() {
     private var lastSpaceTap = 0L
 
     // Tùy chỉnh bố cục
-    private var kbMode = KbMode.DOCKED
+    private var wideLayoutPref = "split" // "normal", "split", "floating" (áp dụng khi màn hình rộng/trong)
     private var keyHeightPref = 52
     private var floatMarginStartDp = 8
     private var floatMarginBottomDp = 8
-    private var floatWidthDp = 320
+    private var floatWidthDp = 340
     private var showKbSettings = false
 
     // Gõ tiếng Việt
@@ -127,11 +126,11 @@ class SamKeyboardService : InputMethodService() {
         super.onCreate()
         val p = prefs()
         vietnamese = p.getBoolean("vietnamese", true)
-        kbMode = if (p.getString("kb_mode", "docked") == "floating") KbMode.FLOATING else KbMode.DOCKED
+        wideLayoutPref = p.getString("kb_wide_layout", "split") ?: "split"
         keyHeightPref = p.getInt("kb_height", 52)
         floatMarginStartDp = p.getInt("kb_fx", 8)
         floatMarginBottomDp = p.getInt("kb_fy", 8)
-        floatWidthDp = p.getInt("kb_fw", 320)
+        floatWidthDp = p.getInt("kb_fw", 340)
     }
 
     override fun onCreateInputView(): View {
@@ -173,7 +172,7 @@ class SamKeyboardService : InputMethodService() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // Tối ưu lại khi gập/mở (màn hình trong/ngoài) hoặc xoay màn hình
+        // Tự tối ưu khi gập/mở: màn hình trong (rộng) -> tách đôi, màn hình ngoài -> bình thường
         rebuild()
     }
 
@@ -210,20 +209,30 @@ class SamKeyboardService : InputMethodService() {
     private fun isNarrowScreen(): Boolean = screenWidthDp() < 380
     private fun isWideScreen(): Boolean = screenWidthDp() >= 600
 
-    private fun effectiveKeyHeight(): Int {
-        val adj = when {
-            isNarrowScreen() -> -2
-            isWideScreen() -> 4
-            else -> 0
+    private fun effectiveLayout(): KbLayout {
+        if (!isWideScreen()) return KbLayout.NORMAL // màn hình ngoài: bàn phím bình thường
+        return when (wideLayoutPref) {
+            "floating" -> KbLayout.FLOATING
+            "normal" -> KbLayout.NORMAL
+            else -> KbLayout.SPLIT // màn hình trong: tách đôi 2 bên
         }
-        return (keyHeightPref + adj).coerceIn(40, 72)
     }
 
-    private fun sidePadDp(): Int = when {
-        kbMode == KbMode.FLOATING -> 2
-        isNarrowScreen() -> 2
-        isWideScreen() -> 28
-        else -> 3
+    private fun effectiveKeyHeight(): Int {
+        val mode = effectiveLayout()
+        val adj = when {
+            mode == KbLayout.SPLIT -> 4
+            isNarrowScreen() -> -2
+            isWideScreen() -> 2
+            else -> 0
+        }
+        return (keyHeightPref + adj).coerceIn(40, 74)
+    }
+
+    private fun sidePadDp(): Int = when (effectiveLayout()) {
+        KbLayout.FLOATING -> 2
+        KbLayout.SPLIT -> 6
+        else -> if (isNarrowScreen()) 2 else 3
     }
 
     private fun currentFloatWidthDp(): Int {
@@ -239,8 +248,9 @@ class SamKeyboardService : InputMethodService() {
             ?: FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             )
+        val mode = effectiveLayout()
         val sw = screenWidthDp()
-        if (kbMode == KbMode.FLOATING) {
+        if (mode == KbLayout.FLOATING) {
             val w = dp(currentFloatWidthDp())
             val maxStart = (sw - pxToDp(w) - 4).coerceAtLeast(0)
             floatMarginStartDp = floatMarginStartDp.coerceIn(0, maxStart)
@@ -254,14 +264,8 @@ class SamKeyboardService : InputMethodService() {
             lp.bottomMargin = dp(floatMarginBottomDp)
             root.setPadding(dp(3), dp(4), dp(3), dp(6))
         } else {
-            val maxDockW = if (isWideScreen()) dp(680) else ViewGroup.LayoutParams.MATCH_PARENT
-            lp.width = if (maxDockW == ViewGroup.LayoutParams.MATCH_PARENT) {
-                ViewGroup.LayoutParams.MATCH_PARENT
-            } else {
-                // trên màn hình trong rộng: giới hạn bề ngang để gõ thoải mái
-                val avail = resources.displayMetrics.widthPixels
-                minOf(maxDockW, avail)
-            }
+            // NORMAL & SPLIT: gộp đáy (SPLIT trải rộng để hai nửa sát hai bên)
+            lp.width = ViewGroup.LayoutParams.MATCH_PARENT
             lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
             lp.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             lp.leftMargin = 0
@@ -279,8 +283,11 @@ class SamKeyboardService : InputMethodService() {
     // ---------------------------------------------------------------- bố cục phím
 
     private fun t(s: String) = Key(Kind.TEXT, s)
+    private fun gap(w: Float = 3.0f) = Key(Kind.SPACER, weight = w)
 
-    private fun layout(): List<List<Key>> {
+    private fun splitGapWeight(): Float = if (screenWidthDp() >= 720) 3.5f else 2.8f
+
+    private fun normalLayout(): List<List<Key>> {
         val bottomLetters = listOf(
             Key(Kind.TO_SYMBOLS_1, "123", 1.25f),
             Key(Kind.LANG, "", 1.0f),
@@ -322,6 +329,65 @@ class SamKeyboardService : InputMethodService() {
             )
         }
     }
+
+    private fun splitLayout(): List<List<Key>> {
+        val g = splitGapWeight()
+        val bottomLetters = listOf(
+            Key(Kind.TO_SYMBOLS_1, "123", 1.25f),
+            Key(Kind.LANG, "", 1.0f),
+            Key(Kind.SPACE, "", 2.25f),
+            gap(g),
+            Key(Kind.SPACE, "", 2.25f),
+            Key(Kind.ENTER, "return", 1.75f),
+        )
+        val bottomSymbols = listOf(
+            Key(Kind.TO_LETTERS, "ABC", 1.25f),
+            Key(Kind.LANG, "", 1.0f),
+            Key(Kind.SPACE, "", 2.25f),
+            gap(g),
+            Key(Kind.SPACE, "", 2.25f),
+            Key(Kind.ENTER, "return", 1.75f),
+        )
+        return when (layer) {
+            Layer.LETTERS -> listOf(
+                "qwert".map { t(it.toString()) } + gap(g) + "yuiop".map { t(it.toString()) },
+                listOf(Key(Kind.SPACER, weight = 0.25f)) +
+                    "asdfg".map { t(it.toString()) } + gap(g) +
+                    "hjkl".map { t(it.toString()) } +
+                    listOf(Key(Kind.SPACER, weight = 0.25f)),
+                listOf(Key(Kind.SHIFT, "⇧", 1.25f)) +
+                    "zxc".map { t(it.toString()) } + gap(g) +
+                    "vbnm".map { t(it.toString()) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
+                bottomLetters,
+            )
+            Layer.SYMBOLS_1 -> listOf(
+                listOf("1", "2", "3", "4", "5").map { t(it) } + gap(g) +
+                    listOf("6", "7", "8", "9", "0").map { t(it) },
+                listOf("-", "/", ":", ";", "(").map { t(it) } + gap(g) +
+                    listOf(")", "$", "&", "@", "\"").map { t(it) },
+                listOf(Key(Kind.TO_SYMBOLS_2, "#+=", 1.25f)) +
+                    listOf(".", ",").map { t(it) } + gap(g) +
+                    listOf("?", "!", "'").map { t(it) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
+                bottomSymbols,
+            )
+            Layer.SYMBOLS_2 -> listOf(
+                listOf("[", "]", "{", "}", "#").map { t(it) } + gap(g) +
+                    listOf("%", "^", "*", "+", "=").map { t(it) },
+                listOf("_", "\\", "|", "~", "<").map { t(it) } + gap(g) +
+                    listOf(">", "€", "£", "¥", "•").map { t(it) },
+                listOf(Key(Kind.TO_SYMBOLS_1, "123", 1.25f)) +
+                    listOf(".", ",").map { t(it) } + gap(g) +
+                    listOf("?", "!", "'").map { t(it) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
+                bottomSymbols,
+            )
+        }
+    }
+
+    private fun activeLayout(): List<List<Key>> =
+        if (effectiveLayout() == KbLayout.SPLIT) splitLayout() else normalLayout()
 
     private fun colors(): Colors {
         val dark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
@@ -371,7 +437,7 @@ class SamKeyboardService : InputMethodService() {
 
         val rowH = effectiveKeyHeight()
         val textScale = (rowH / 52f).coerceIn(0.85f, 1.2f)
-        for (row in layout()) {
+        for (row in activeLayout()) {
             val rowView = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -394,28 +460,50 @@ class SamKeyboardService : InputMethodService() {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             )
         }
-        val row = LinearLayout(this).apply {
+
+        val wide = isWideScreen()
+        val eff = effectiveLayout()
+
+        val row1 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
             )
         }
-        row.addView(chip(if (kbMode == KbMode.FLOATING) "Gộp" else "Tách rời", 1.4f, c) {
-            kbMode = if (kbMode == KbMode.DOCKED) KbMode.FLOATING else KbMode.DOCKED
-            prefs().edit().putString("kb_mode", if (kbMode == KbMode.FLOATING) "floating" else "docked").apply()
-            rebuild()
-        })
-        row.addView(chip("Cao −", 1.0f, c) { adjustHeight(-2) })
-        row.addView(labelChip("${effectiveKeyHeight()}", 0.7f, c))
-        row.addView(chip("+", 0.7f, c) { adjustHeight(2) })
-        row.addView(chip("Đóng", 0.9f, c) {
+        if (wide) {
+            row1.addView(chip("Bình thường", 1.3f, c, accent = eff == KbLayout.NORMAL) {
+                setWideLayout("normal")
+            })
+            row1.addView(chip("Tách đôi", 1.2f, c, accent = eff == KbLayout.SPLIT) {
+                setWideLayout("split")
+            })
+            row1.addView(chip("Nổi", 0.9f, c, accent = eff == KbLayout.FLOATING) {
+                setWideLayout("floating")
+            })
+        } else {
+            row1.addView(labelChip("Màn hình ngoài: bàn phím thường", 3.4f, c))
+        }
+        row1.addView(chip("Đóng", 0.9f, c) {
             showKbSettings = false
             rebuild()
         })
-        bar.addView(row)
+        bar.addView(row1)
 
-        if (kbMode == KbMode.FLOATING) {
+        val row2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
+            )
+        }
+        row2.addView(labelChip("Chiều cao", 1.2f, c))
+        row2.addView(chip("−", 0.7f, c) { adjustHeight(-2) })
+        row2.addView(labelChip("${effectiveKeyHeight()}", 0.7f, c))
+        row2.addView(chip("+", 0.7f, c) { adjustHeight(2) })
+        bar.addView(row2)
+
+        if (eff == KbLayout.FLOATING) {
             val drag = TextView(this).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(34),
@@ -445,6 +533,12 @@ class SamKeyboardService : InputMethodService() {
             bar.addView(nudge)
         }
         return bar
+    }
+
+    private fun setWideLayout(mode: String) {
+        wideLayoutPref = mode
+        prefs().edit().putString("kb_wide_layout", mode).apply()
+        rebuild()
     }
 
     private inner class DragTouchListener : View.OnTouchListener {
@@ -497,7 +591,7 @@ class SamKeyboardService : InputMethodService() {
     }
 
     private fun adjustHeight(delta: Int) {
-        keyHeightPref = (keyHeightPref + delta).coerceIn(40, 72)
+        keyHeightPref = (keyHeightPref + delta).coerceIn(40, 74)
         prefs().edit().putInt("kb_height", keyHeightPref).apply()
         rebuild()
     }
@@ -536,7 +630,12 @@ class SamKeyboardService : InputMethodService() {
     }
 
     private fun makeKeyView(key: Key, c: Colors, textScale: Float): View {
-        val hMargin = if (isNarrowScreen() || kbMode == KbMode.FLOATING) 2 else 3
+        val mode = effectiveLayout()
+        val hMargin = when {
+            mode == KbLayout.SPLIT -> 3
+            mode == KbLayout.FLOATING || isNarrowScreen() -> 2
+            else -> 3
+        }
         val params = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, key.weight)
             .apply { setMargins(dp(hMargin), dp(4), dp(hMargin), dp(4)) }
 
@@ -568,7 +667,7 @@ class SamKeyboardService : InputMethodService() {
                 TypedValue.COMPLEX_UNIT_SP,
                 when (key.kind) {
                     Kind.TEXT -> 22f * textScale
-                    Kind.SPACE -> 16f * textScale
+                    Kind.SPACE -> 15f * textScale
                     Kind.ENTER -> 15f * textScale
                     else -> 17f * textScale
                 },
