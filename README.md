@@ -16,6 +16,15 @@ Bàn phím Android (giao diện kiểu iPhone), viết bằng Kotlin. Không qu�
 - Nút **return** tự đổi theo ô nhập (Go, Tìm, Gửi, Tiếp, Xong, ...).
 - Phím **VI / EN** để chuyển giữa tiếng Việt (Telex) và tiếng Anh, có nhớ lựa chọn.
 
+## Bố cục: tách rời & chiều cao (tối ưu gập/mở)
+
+Bấm nút **⌨** trên thanh công cụ để mở bảng tinh chỉnh:
+
+- **Tách rời / Gộp**: chuyển giữa bàn phím cố định (gộp, đáy màn hình) và **bàn phím tách rời/nổi**.
+- **Chế độ tách rời**: kéo thanh **“⠿ Kéo để di chuyển bàn phím”** để đặt vị trí bất kỳ, dùng nút ← → ↑ ↓ để dịch nhẹ, **Rộng −/+** để đổi độ rộng. Vị trí/kích thước/chiều cao được lưu lại.
+- **Chiều cao**: nút **Cao − / +** để tăng giảm chiều cao phím (lưu lại).
+- **Tối ưu cho Oppo Find N5 (màn hình trong & ngoài)**: tự điều chỉnh khi gập/mở hoặc đổi cấu hình (giới hạn bề ngang và canh lề hợp lý trên màn hình trong rộng, thu gọn lề/chiều cao phù hợp trên màn hình ngoài hẹp) để gõ thoải mái ở cả hai màn hình.
+
 ## Gõ tiếng Việt (Telex)
 
 - Dấu thanh: `s`=sắc, `f`=huyền, `r`=hỏi, `x`=ngã, `j`=nặng, `z`=xóa dấu
@@ -50,7 +59,7 @@ Muốn có file APK để gửi cho máy khác: menu **Build > Build Bundle(s) /
 
 ## Cấu trúc code
 
-- `app/src/main/java/com/example/samkeyboard/SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, popup, xử lý gõ, bảng dịch)
+- `app/src/main/java/com/example/samkeyboard/SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, popup, xử lý gõ, bảng dịch, chế độ tách rời/chiều cao)
 - `app/src/main/java/com/example/samkeyboard/TelexEngine.kt`: bộ gõ Telex
 - `app/src/main/java/com/example/samkeyboard/SettingsActivity.kt`: màn hình hướng dẫn bật bàn phím
 - `app/src/main/res/xml/method.xml`: khai báo bàn phím với hệ thống

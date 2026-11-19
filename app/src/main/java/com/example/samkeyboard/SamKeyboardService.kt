@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -28,11 +29,13 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.net.UnknownHostException
+import kotlin.math.roundToInt
 
 /**
- * Bàn phím QWERTY (giao diện kiểu iPhone):
+ * Bàn phím QWERTY (giao diện kiểu iPhone) tối ưu cho màn hình gập (Oppo Find N5 trong/ngoài):
  *  - Chuyển đổi English / Tiếng Việt (gõ Telex) bằng phím VI/EN
  *  - Dịch sang English, 繁體中文, မြန်မာ: bấm Dịch để dịch và thay thế trực tiếp vào ô chat
+ *  - Chế độ Gộp (cố định) / Tách rời (nổi, có thể kéo di chuyển), tinh chỉnh chiều cao phím
  *  - Shift (chạm đúp = Caps Lock), giữ phím xóa để xóa liên tục, tự viết hoa đầu câu,
  *    chạm đúp dấu cách = ". ", 2 trang ký hiệu, giao diện sáng/tối theo hệ thống.
  *  - Popup phím và phản hồi rung khi gõ.
@@ -44,6 +47,7 @@ class SamKeyboardService : InputMethodService() {
     private enum class Kind {
         TEXT, SHIFT, DELETE, TO_SYMBOLS_1, TO_SYMBOLS_2, TO_LETTERS, LANG, SPACE, ENTER, SPACER,
     }
+    private enum class KbMode { DOCKED, FLOATING }
 
     private class Key(val kind: Kind, val label: String = "", val weight: Float = 1f)
 
@@ -58,6 +62,7 @@ class SamKeyboardService : InputMethodService() {
         val accent: Int,
         val popupBg: Int,
         val popupText: Int,
+        val panel: Int,
     )
 
     private class Target(val code: String, val name: String)
@@ -71,6 +76,14 @@ class SamKeyboardService : InputMethodService() {
     private var shift = Shift.OFF
     private var lastShiftTap = 0L
     private var lastSpaceTap = 0L
+
+    // Tùy chỉnh bố cục
+    private var kbMode = KbMode.DOCKED
+    private var keyHeightPref = 52
+    private var floatMarginStartDp = 8
+    private var floatMarginBottomDp = 8
+    private var floatWidthDp = 320
+    private var showKbSettings = false
 
     // Gõ tiếng Việt
     private val telex = TelexEngine()
@@ -112,7 +125,13 @@ class SamKeyboardService : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
-        vietnamese = prefs().getBoolean("vietnamese", true)
+        val p = prefs()
+        vietnamese = p.getBoolean("vietnamese", true)
+        kbMode = if (p.getString("kb_mode", "docked") == "floating") KbMode.FLOATING else KbMode.DOCKED
+        keyHeightPref = p.getInt("kb_height", 52)
+        floatMarginStartDp = p.getInt("kb_fx", 8)
+        floatMarginBottomDp = p.getInt("kb_fy", 8)
+        floatWidthDp = p.getInt("kb_fw", 320)
     }
 
     override fun onCreateInputView(): View {
@@ -126,19 +145,9 @@ class SamKeyboardService : InputMethodService() {
         }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(3), dp(6), dp(3), dp(8))
         }
-        container.addView(
-            root,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ),
-        )
-        container.addView(
-            popup,
-            FrameLayout.LayoutParams(dp(56), dp(64)),
-        )
+        container.addView(root)
+        container.addView(popup, FrameLayout.LayoutParams(dp(56), dp(64)))
         rebuild()
         return container
     }
@@ -160,6 +169,12 @@ class SamKeyboardService : InputMethodService() {
         finishTelex()
         resetTranslateState()
         super.onFinishInputView(finishingInput)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Tối ưu lại khi gập/mở (màn hình trong/ngoài) hoặc xoay màn hình
+        rebuild()
     }
 
     override fun onUpdateSelection(
@@ -188,7 +203,80 @@ class SamKeyboardService : InputMethodService() {
 
     private fun prefs() = getSharedPreferences("samkeyboard", Context.MODE_PRIVATE)
 
-    // ---------------------------------------------------------------- bố cục
+    // ---------------------------------------------------------------- tối ưu màn hình (gập/mở)
+
+    private fun screenWidthDp(): Int = resources.configuration.screenWidthDp
+    private fun screenHeightDp(): Int = resources.configuration.screenHeightDp
+    private fun isNarrowScreen(): Boolean = screenWidthDp() < 380
+    private fun isWideScreen(): Boolean = screenWidthDp() >= 600
+
+    private fun effectiveKeyHeight(): Int {
+        val adj = when {
+            isNarrowScreen() -> -2
+            isWideScreen() -> 4
+            else -> 0
+        }
+        return (keyHeightPref + adj).coerceIn(40, 72)
+    }
+
+    private fun sidePadDp(): Int = when {
+        kbMode == KbMode.FLOATING -> 2
+        isNarrowScreen() -> 2
+        isWideScreen() -> 28
+        else -> 3
+    }
+
+    private fun currentFloatWidthDp(): Int {
+        val sw = screenWidthDp()
+        val maxW = (sw - 12).coerceAtLeast(240)
+        val minW = 260.coerceAtMost(maxW)
+        return floatWidthDp.coerceIn(minW, maxW)
+    }
+
+    private fun applyRootLayout() {
+        if (!::root.isInitialized || !::container.isInitialized) return
+        val lp = (root.layoutParams as? FrameLayout.LayoutParams)
+            ?: FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        val sw = screenWidthDp()
+        if (kbMode == KbMode.FLOATING) {
+            val w = dp(currentFloatWidthDp())
+            val maxStart = (sw - pxToDp(w) - 4).coerceAtLeast(0)
+            floatMarginStartDp = floatMarginStartDp.coerceIn(0, maxStart)
+            val maxBottom = (screenHeightDp() - 120).coerceAtLeast(0)
+            floatMarginBottomDp = floatMarginBottomDp.coerceIn(0, maxBottom)
+            lp.width = w
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            lp.gravity = Gravity.BOTTOM or Gravity.START
+            lp.leftMargin = dp(floatMarginStartDp)
+            lp.rightMargin = 0
+            lp.bottomMargin = dp(floatMarginBottomDp)
+            root.setPadding(dp(3), dp(4), dp(3), dp(6))
+        } else {
+            val maxDockW = if (isWideScreen()) dp(680) else ViewGroup.LayoutParams.MATCH_PARENT
+            lp.width = if (maxDockW == ViewGroup.LayoutParams.MATCH_PARENT) {
+                ViewGroup.LayoutParams.MATCH_PARENT
+            } else {
+                // trên màn hình trong rộng: giới hạn bề ngang để gõ thoải mái
+                val avail = resources.displayMetrics.widthPixels
+                minOf(maxDockW, avail)
+            }
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            lp.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            lp.leftMargin = 0
+            lp.rightMargin = 0
+            lp.bottomMargin = 0
+            val sp = dp(sidePadDp())
+            root.setPadding(sp, dp(4), sp, dp(8))
+        }
+        root.layoutParams = lp
+    }
+
+    private fun pxToDp(px: Int): Int =
+        (px / resources.displayMetrics.density).roundToInt()
+
+    // ---------------------------------------------------------------- bố cục phím
 
     private fun t(s: String) = Key(Kind.TEXT, s)
 
@@ -250,6 +338,7 @@ class SamKeyboardService : InputMethodService() {
                 accent = Color.parseColor("#0A84FF"),
                 popupBg = Color.parseColor("#636366"),
                 popupText = Color.WHITE,
+                panel = Color.parseColor("#2C2C2E"),
             )
         } else {
             Colors(
@@ -263,6 +352,7 @@ class SamKeyboardService : InputMethodService() {
                 accent = Color.parseColor("#007AFF"),
                 popupBg = Color.WHITE,
                 popupText = Color.BLACK,
+                panel = Color.parseColor("#E5E6EA"),
             )
         }
     }
@@ -272,24 +362,148 @@ class SamKeyboardService : InputMethodService() {
     private fun rebuild() {
         if (!::root.isInitialized) return
         val c = colors()
+        applyRootLayout()
         root.removeAllViews()
         root.setBackgroundColor(c.background)
+
+        if (showKbSettings) root.addView(buildAdjustBar(c))
         root.addView(buildToolbar(c))
 
+        val rowH = effectiveKeyHeight()
+        val textScale = (rowH / 52f).coerceIn(0.85f, 1.2f)
         for (row in layout()) {
             val rowView = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(rowH),
                 ).apply { bottomMargin = dp(1) }
             }
-            for (key in row) rowView.addView(makeKeyView(key, c))
+            for (key in row) rowView.addView(makeKeyView(key, c, textScale))
             root.addView(rowView)
         }
         popup.setTextColor(c.popupText)
         popup.background = rounded(c.popupBg, 10)
     }
+
+    private fun buildAdjustBar(c: Colors): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(c.panel)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
+            )
+        }
+        row.addView(chip(if (kbMode == KbMode.FLOATING) "Gộp" else "Tách rời", 1.4f, c) {
+            kbMode = if (kbMode == KbMode.DOCKED) KbMode.FLOATING else KbMode.DOCKED
+            prefs().edit().putString("kb_mode", if (kbMode == KbMode.FLOATING) "floating" else "docked").apply()
+            rebuild()
+        })
+        row.addView(chip("Cao −", 1.0f, c) { adjustHeight(-2) })
+        row.addView(labelChip("${effectiveKeyHeight()}", 0.7f, c))
+        row.addView(chip("+", 0.7f, c) { adjustHeight(2) })
+        row.addView(chip("Đóng", 0.9f, c) {
+            showKbSettings = false
+            rebuild()
+        })
+        bar.addView(row)
+
+        if (kbMode == KbMode.FLOATING) {
+            val drag = TextView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(34),
+                )
+                text = "⠿  Kéo để di chuyển bàn phím"
+                gravity = Gravity.CENTER
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextColor(c.text)
+                setBackgroundColor(adjustAlpha(c.special, 180))
+                setOnTouchListener(DragTouchListener())
+            }
+            bar.addView(drag)
+
+            val nudge = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(34),
+                )
+            }
+            nudge.addView(chip("←", 1f, c) { nudgeFloat(-12, 0) })
+            nudge.addView(chip("→", 1f, c) { nudgeFloat(12, 0) })
+            nudge.addView(chip("↑", 1f, c) { nudgeFloat(0, 12) })
+            nudge.addView(chip("↓", 1f, c) { nudgeFloat(0, -12) })
+            nudge.addView(chip("Rộng −", 1f, c) { adjustFloatWidth(-12) })
+            nudge.addView(chip("Rộng +", 1f, c) { adjustFloatWidth(12) })
+            bar.addView(nudge)
+        }
+        return bar
+    }
+
+    private inner class DragTouchListener : View.OnTouchListener {
+        private var startRawX = 0f
+        private var startRawY = 0f
+        private var startMarginStart = 0
+        private var startMarginBottom = 0
+        override fun onTouch(v: View, ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startRawX = ev.rawX
+                    startRawY = ev.rawY
+                    startMarginStart = floatMarginStartDp
+                    startMarginBottom = floatMarginBottomDp
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dxDp = pxToDp((ev.rawX - startRawX).roundToInt())
+                    val dyDp = pxToDp((ev.rawY - startRawY).roundToInt())
+                    floatMarginStartDp = startMarginStart + dxDp
+                    floatMarginBottomDp = startMarginBottom - dyDp
+                    saveFloatState()
+                    applyRootLayout()
+                    return true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return true
+            }
+            return false
+        }
+    }
+
+    private fun nudgeFloat(dx: Int, dy: Int) {
+        floatMarginStartDp += dx
+        floatMarginBottomDp += dy
+        saveFloatState()
+        applyRootLayout()
+    }
+
+    private fun adjustFloatWidth(delta: Int) {
+        floatWidthDp += delta
+        prefs().edit().putInt("kb_fw", floatWidthDp).apply()
+        applyRootLayout()
+    }
+
+    private fun saveFloatState() {
+        prefs().edit()
+            .putInt("kb_fx", floatMarginStartDp)
+            .putInt("kb_fy", floatMarginBottomDp)
+            .apply()
+    }
+
+    private fun adjustHeight(delta: Int) {
+        keyHeightPref = (keyHeightPref + delta).coerceIn(40, 72)
+        prefs().edit().putInt("kb_height", keyHeightPref).apply()
+        rebuild()
+    }
+
+    private fun adjustAlpha(color: Int, alpha: Int): Int =
+        Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
 
     private fun displayLabel(key: Key): String =
         if (key.kind == Kind.TEXT && layer == Layer.LETTERS && shift != Shift.OFF) {
@@ -321,9 +535,10 @@ class SamKeyboardService : InputMethodService() {
         else -> displayLabel(key)
     }
 
-    private fun makeKeyView(key: Key, c: Colors): View {
+    private fun makeKeyView(key: Key, c: Colors, textScale: Float): View {
+        val hMargin = if (isNarrowScreen() || kbMode == KbMode.FLOATING) 2 else 3
         val params = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, key.weight)
-            .apply { setMargins(dp(3), dp(4), dp(3), dp(4)) }
+            .apply { setMargins(dp(hMargin), dp(4), dp(hMargin), dp(4)) }
 
         if (key.kind == Kind.SPACER) {
             return View(this).apply { layoutParams = params }
@@ -352,10 +567,10 @@ class SamKeyboardService : InputMethodService() {
             setTextSize(
                 TypedValue.COMPLEX_UNIT_SP,
                 when (key.kind) {
-                    Kind.TEXT -> 22f
-                    Kind.SPACE -> 16f
-                    Kind.ENTER -> 16f
-                    else -> 18f
+                    Kind.TEXT -> 22f * textScale
+                    Kind.SPACE -> 16f * textScale
+                    Kind.ENTER -> 15f * textScale
+                    else -> 17f * textScale
                 },
             )
             background = rounded(baseColor, 5)
@@ -415,7 +630,7 @@ class SamKeyboardService : InputMethodService() {
     }
 
     private fun performKeyHaptic(v: View) {
-        val ok = if (android.os.Build.VERSION.SDK_INT >= 27) {
+        val ok = if (Build.VERSION.SDK_INT >= 27) {
             v.performHapticFeedback(
                 HapticFeedbackConstants.KEYBOARD_PRESS,
                 HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING or
@@ -435,9 +650,14 @@ class SamKeyboardService : InputMethodService() {
         val lp = popup.layoutParams as FrameLayout.LayoutParams
         lp.width = dp(if (text.length <= 1) 56 else 72)
         lp.height = dp(64)
-        val ax = anchor.left + anchor.width / 2 - lp.width / 2
-        val ay = anchor.top - lp.height - dp(6)
-        lp.leftMargin = ax.coerceIn(dp(2), (container.width - lp.width - dp(2)).coerceAtLeast(dp(2)))
+        val locA = IntArray(2)
+        val locC = IntArray(2)
+        anchor.getLocationInWindow(locA)
+        container.getLocationInWindow(locC)
+        val ax = locA[0] - locC[0] + anchor.width / 2 - lp.width / 2
+        val ay = locA[1] - locC[1] - lp.height - dp(6)
+        val cw = if (container.width > 0) container.width else resources.displayMetrics.widthPixels
+        lp.leftMargin = ax.coerceIn(dp(2), (cw - lp.width - dp(2)).coerceAtLeast(dp(2)))
         lp.topMargin = ay.coerceAtLeast(dp(2))
         popup.layoutParams = lp
     }
@@ -747,14 +967,16 @@ class SamKeyboardService : InputMethodService() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(40),
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
                 )
             }
-            bar.addView(chip("Dịch", 1.4f, c) { openTranslate() })
+            bar.addView(chip("Dịch", 1.3f, c) { openTranslate() })
             bar.addView(View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.MATCH_PARENT, 6f,
-                )
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 5f)
+            })
+            bar.addView(chip("⌨", 0.9f, c) {
+                showKbSettings = !showKbSettings
+                rebuild()
             })
             return bar
         }
@@ -776,7 +998,7 @@ class SamKeyboardService : InputMethodService() {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
             )
         }
-        control.addView(chip("Sang: " + targets[targetIndex].name, 2.8f, c) {
+        control.addView(chip("Sang: " + targets[targetIndex].name, 2.6f, c) {
             targetIndex = (targetIndex + 1) % targets.size
             rebuild()
             // Đổi ngôn ngữ đích -> dịch và thay thế trực tiếp
@@ -787,9 +1009,13 @@ class SamKeyboardService : InputMethodService() {
             translateStatus != null && trResult.isEmpty() -> translateStatus!!
             else -> "Dịch"
         }
-        control.addView(chip(actionLabel, 1.4f, c, accent = true) {
+        control.addView(chip(actionLabel, 1.3f, c, accent = true) {
             // Bấm Dịch -> dịch và thay thế trực tiếp lên ô chat
             translateNow(auto = false)
+        })
+        control.addView(chip("⌨", 0.7f, c) {
+            showKbSettings = !showKbSettings
+            rebuild()
         })
         control.addView(chip("✕", 0.7f, c) { closeTranslate() })
         panel.addView(control)
@@ -841,7 +1067,7 @@ class SamKeyboardService : InputMethodService() {
             .apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }
         text = label
         gravity = Gravity.CENTER
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         setTextColor(if (accent) Color.WHITE else c.text)
         background = rounded(if (accent) c.accent else c.special, 8)
         isClickable = true
@@ -849,6 +1075,15 @@ class SamKeyboardService : InputMethodService() {
             performKeyHaptic(it)
             onClick()
         }
+    }
+
+    private fun labelChip(label: String, weight: Float, c: Colors): View = TextView(this).apply {
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight)
+            .apply { setMargins(dp(2), dp(3), dp(2), dp(3)) }
+        text = label
+        gravity = Gravity.CENTER
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setTextColor(c.text)
     }
 
     private fun setTrStatus(status: String?, clearAfterMs: Long = 0) {

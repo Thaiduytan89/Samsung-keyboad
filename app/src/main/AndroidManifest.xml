@@ -3,12 +3,14 @@
 
     <!-- Chỉ dùng khi bấm nút Dịch: gửi đúng đoạn chữ cần dịch lên dịch vụ dịch của Google. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light">
+        android:theme="@android:style/Theme.Material.Light"
+        android:resizeableActivity="true">
 
         <activity
             android:name=".SettingsActivity"
