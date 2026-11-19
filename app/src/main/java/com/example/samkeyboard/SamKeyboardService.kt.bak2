@@ -1,0 +1,818 @@
+package com.example.samkeyboard
+
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.inputmethodservice.InputMethodService
+import android.media.AudioManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.text.InputType
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
+import android.view.textservice.SentenceSuggestionsInfo
+import android.view.textservice.SpellCheckerSession
+import android.view.textservice.SuggestionsInfo
+import android.view.textservice.TextInfo
+import android.view.textservice.TextServicesManager
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+import org.json.JSONArray
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
+import java.net.URL
+import java.net.URLEncoder
+import java.net.UnknownHostException
+import java.util.Locale
+import kotlin.math.roundToInt
+
+/**
+ * Bàn phím QWERTY tối ưu cho màn hình gập (Oppo Find N5 trong/ngoài):
+ *  - Màn hình trong (rộng): tách đôi kiểu Gboard + dãy số, dấu cách liền, popup lớn, gõ 2 tay.
+ *  - Màn hình ngoài (gập lại): bàn phím bình thường.
+ *  - Tinh chỉnh (bố cục, chiều cao, lề, khoảng cách phím, theme, màu, âm, sửa lỗi, nổi)
+ *    lưu RIÊNG BIỆT cho từng màn hình (trong/ngoài) và từng chiều (dọc/ngang).
+ *  - Telex QWERTY (VI/EN), tự sửa chính tả khi bấm dấu cách.
+ *  - Dịch: gõ nguồn trong bảng dịch, bản dịch hiện thẳng (trực tiếp) lên khung chat.
+ *  - Giọng nói VI (song song) và VI→EN (dịch & hiện lên khung chat; bấm ngắt thu âm sẽ dịch ngay).
+ *  - Giao diện iPhone/Samsung, đổi màu, popup mượt, âm thanh gõ.
+ */
+class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellCheckerSessionListener {
+
+    private enum class Layer { LETTERS, SYMBOLS_1, SYMBOLS_2 }
+    private enum class Shift { OFF, ON, LOCK }
+    private enum class Kind {
+        TEXT, SHIFT, DELETE, TO_SYMBOLS_1, TO_SYMBOLS_2, TO_LETTERS, LANG, SPACE, ENTER, SPACER,
+    }
+    private enum class KbLayout { NORMAL, SPLIT, FLOATING }
+
+    private class Key(val kind: Kind, val label: String = "", val weight: Float = 1f)
+
+    private class Colors(
+        val background: Int,
+        val key: Int,
+        val special: Int,
+        val pressedKey: Int,
+        val pressedSpecial: Int,
+        val text: Int,
+        val specialText: Int,
+        val accent: Int,
+        val popupBg: Int,
+        val popupText: Int,
+        val panel: Int,
+        val keyStroke: Int,
+    )
+
+    private class Target(val code: String, val name: String)
+
+    private data class KbColor(val name: String, val accent: Int, val lightTint: Int, val darkTint: Int)
+
+    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var container: FrameLayout
+    private lateinit var root: LinearLayout
+    private lateinit var popup: TextView
+
+    private var layer = Layer.LETTERS
+    private var shift = Shift.OFF
+    private var lastShiftTap = 0L
+    private var lastSpaceTap = 0L
+
+    // ----- Tùy chỉnh (lưu riêng: màn hình trong/ngoài × dọc/ngang) -----
+    private var wideLayoutPref = "split"
+    private var keyHeightPref = 52
+    private var floatMarginStartDp = 8
+    private var floatMarginBottomDp = 8
+    private var floatWidthDp = 340
+    private var showKbSettings = false
+    private var showDeepTune = false
+    private var kbStyle = "iphone"
+    private var kbColorIndex = 0
+    private var sideInsetDp = 0
+    private var keyHGapDp = 3
+    private var keyVGapDp = 4
+    private var soundMode = 1
+    private var autoCorrect = true
+
+    private val soundModes = listOf("Tắt", "Mặc định", "Nhẹ", "Click", "Rõ")
+
+    private val kbColors = listOf(
+        KbColor("Mặc định", Color.parseColor("#007AFF"), 0, 0),
+        KbColor("Xanh dương", Color.parseColor("#007AFF"), Color.parseColor("#D6E4FF"), Color.parseColor("#0A2540")),
+        KbColor("Xanh lá", Color.parseColor("#34C759"), Color.parseColor("#DFF5E3"), Color.parseColor("#0F2E17")),
+        KbColor("Xanh ngọc", Color.parseColor("#00B3A4"), Color.parseColor("#D7F5F2"), Color.parseColor("#0A2E2B")),
+        KbColor("Tím", Color.parseColor("#AF52DE"), Color.parseColor("#F0E0FA"), Color.parseColor("#2A1533")),
+        KbColor("Hồng", Color.parseColor("#FF2D55"), Color.parseColor("#FFE0E8"), Color.parseColor("#33121A")),
+        KbColor("Cam", Color.parseColor("#FF9500"), Color.parseColor("#FFE8CC"), Color.parseColor("#33210A")),
+        KbColor("Xám", Color.parseColor("#8E8E93"), Color.parseColor("#E5E5EA"), Color.parseColor("#2C2C2E")),
+    )
+
+    // Telex (VI/EN)
+    private val telex = TelexEngine()
+    private var vietnamese = true
+    private var telexAllowed = true
+
+    // Dịch
+    private val targets = listOf(
+        Target("en", "English"),
+        Target("zh-TW", "繁體中文"),
+        Target("my", "မြန်မာ"),
+    )
+    private var translateOpen = false
+    private var translateStatus: String? = null
+    private var targetIndex = 0
+    private var translateJob = 0
+    private var trSourceBase = ""
+    private val trSourceTelex = TelexEngine()
+    private var trAnchorBefore = ""
+    private var trAnchorAfter = ""
+    private var trChatText = ""
+    private var trTranslating = false
+    private var trFinalizing = false
+
+    // Tự sửa chính tả
+    private var scSession: SpellCheckerSession? = null
+    private var scLocale: Locale? = null
+    private var acWord: String? = null
+    private var acWordLen: Int = 0
+    private var acSeparator: String = " "
+
+    private val commonFixes = mapOf(
+        "teh" to "the", "adn" to "and", "ahve" to "have", "waht" to "what", "taht" to "that",
+        "hte" to "the", "recieve" to "receive", "seperate" to "separate", "definately" to "definitely",
+        "occured" to "occurred", "wierd" to "weird", "untill" to "until", "alot" to "a lot",
+        "becuase" to "because", "goverment" to "government", "enviroment" to "environment",
+        "freind" to "friend", "adress" to "address", "begining" to "beginning", "comming" to "coming",
+        "tommorow" to "tomorrow", "neccessary" to "necessary", "accomodate" to "accommodate",
+        "occurence" to "occurrence", "arguement" to "argument", "calender" to "calendar",
+        "collegue" to "colleague", "concious" to "conscious", "dissapear" to "disappear",
+        "existance" to "existence", "foriegn" to "foreign", "grammer" to "grammar",
+        "harrass" to "harass", "independant" to "independent", "liason" to "liaison",
+        "maintainance" to "maintenance", "noticable" to "noticeable", "posession" to "possession",
+        "publically" to "publicly", "realy" to "really", "succesful" to "successful",
+        "tounge" to "tongue", "truely" to "truly", "writting" to "writing",
+        "dont" to "don't", "cant" to "can't", "wont" to "won't", "im" to "I'm",
+        "ive" to "I've", "youre" to "you're", "theyre" to "they're", "didnt" to "didn't",
+        "doesnt" to "doesn't", "isnt" to "isn't", "wasnt" to "wasn't", "shouldnt" to "shouldn't",
+        "couldnt" to "couldn't", "wouldnt" to "wouldn't", "hasnt" to "hasn't", "havent" to "haven't",
+    )
+
+    // Nhập liệu giọng nói
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var voiceMode: Int = 0 // 0: không, 1: VI, 2: VI→EN
+    private var voiceStatus: String? = null
+    private var voiceComposing: Boolean = false
+    private var voicePartialJob: Int = 0
+    private var lastVoicePartialVi: String = ""
+    private val voicePartialRunnable = Runnable { runVoicePartialTranslate() }
+
+    private val repeatDelete = object : Runnable {
+        override fun run() { deleteOnce(); handler.postDelayed(this, 45) }
+    }
+
+    private val trAutoTranslate = Runnable { translateNow(auto = true) }
+
+    // ---------------------------------------------------------------- vòng đời
+
+    override fun onCreate() {
+        super.onCreate()
+        vietnamese = prefs().getBoolean("vietnamese", true)
+        loadProfileSettings()
+    }
+
+    override fun onCreateInputView(): View {
+        container = FrameLayout(this)
+        popup = TextView(this).apply {
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            elevation = dp(8).toFloat()
+            typeface = Typeface.DEFAULT
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 34f)
+        }
+        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        container.addView(root)
+        container.addView(popup, FrameLayout.LayoutParams(dp(56), dp(64)))
+        rebuild()
+        return container
+    }
+
+    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        finishTelex()
+        telexAllowed = allowsTelex(info)
+        translateStatus = null
+        resetTranslateState()
+        layer = Layer.LETTERS
+        shift = if (capsMode() != 0) Shift.ON else Shift.OFF
+        rebuild()
+    }
+
+    override fun onFinishInputView(finishingInput: Boolean) {
+        handler.removeCallbacks(repeatDelete)
+        stopVoice(resetStatus = false)
+        hidePopup()
+        finishTelex()
+        resetTranslateState()
+        super.onFinishInputView(finishingInput)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        loadProfileSettings()
+        rebuild()
+    }
+
+    override fun onUpdateSelection(
+        oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int,
+        candidatesStart: Int, candidatesEnd: Int,
+    ) {
+        super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        if (!telex.isEmpty &&
+            (candidatesStart == -1 || newSelStart != candidatesEnd || newSelEnd != candidatesEnd)
+        ) {
+            finishTelex()
+        }
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        try { scSession?.close() } catch (_: Exception) {}
+        scSession = null
+        try { speechRecognizer?.destroy() } catch (_: Exception) {}
+        speechRecognizer = null
+        super.onDestroy()
+    }
+
+    private fun prefs() = getSharedPreferences("samkeyboard", Context.MODE_PRIVATE)
+
+    // ---------------------------------------------------------------- hồ sơ theo màn hình & chiều
+
+    private fun screenWidthDp(): Int = resources.configuration.screenWidthDp
+    private fun screenHeightDp(): Int = resources.configuration.screenHeightDp
+    private fun isWideScreen(): Boolean = screenWidthDp() >= 600
+    private fun orientationTag(): String =
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "land" else "port"
+    private fun baseProfile(): String = if (isWideScreen()) "wide" else "narrow"
+    private fun profile(): String = baseProfile() + "_" + orientationTag()
+    private fun pkey(name: String): String = profile() + "_" + name
+
+    private fun loadProfileSettings() {
+        val p = prefs()
+        val pf = profile()
+        val base = baseProfile()
+        fun ig(name: String, old: String, def: Int): Int =
+            p.getInt("${pf}_$name", p.getInt("${base}_$name", p.getInt(old, def)))
+        fun sg(name: String, old: String, def: String): String =
+            p.getString("${pf}_$name", p.getString("${base}_$name", p.getString(old, def))) ?: def
+        fun bg(name: String, old: String, def: Boolean): Boolean =
+            p.getBoolean("${pf}_$name", p.getBoolean("${base}_$name", p.getBoolean(old, def)))
+
+        wideLayoutPref = sg("layout", "kb_wide_layout", "split")
+        keyHeightPref = ig("height", "kb_height", 52)
+        floatMarginStartDp = ig("fx", "kb_fx", 8)
+        floatMarginBottomDp = ig("fy", "kb_fy", 8)
+        floatWidthDp = ig("fw", "kb_fw", 340)
+        kbStyle = sg("style", "kb_style", "iphone")
+        kbColorIndex = ig("color", "kb_color", 0).coerceIn(0, kbColors.lastIndex)
+        sideInsetDp = ig("inset", "kb_side_inset", 0)
+        keyHGapDp = ig("hgap", "kb_h_gap", 3)
+        keyVGapDp = ig("vgap", "kb_v_gap", 4)
+        soundMode = ig("sound", "kb_sound", 1).coerceIn(0, soundModes.lastIndex)
+        autoCorrect = bg("autocorrect", "kb_autocorrect", true)
+    }
+
+    private fun saveInt(name: String, value: Int) { prefs().edit().putInt(pkey(name), value).apply() }
+    private fun saveString(name: String, value: String) { prefs().edit().putString(pkey(name), value).apply() }
+    private fun saveBool(name: String, value: Boolean) { prefs().edit().putBoolean(pkey(name), value).apply() }
+
+    // ---------------------------------------------------------------- tối ưu màn hình
+
+    private fun effectiveLayout(): KbLayout {
+        if (!isWideScreen()) return KbLayout.NORMAL
+        return when (wideLayoutPref) {
+            "floating" -> KbLayout.FLOATING
+            "normal" -> KbLayout.NORMAL
+            else -> KbLayout.SPLIT
+        }
+    }
+
+    private fun effectiveKeyHeight(): Int {
+        val mode = effectiveLayout()
+        val adj = when {
+            mode == KbLayout.SPLIT -> 4
+            isWideScreen() -> 2
+            else -> -2
+        }
+        return (keyHeightPref + adj).coerceIn(36, 78)
+    }
+
+    private fun sidePadDp(): Int {
+        val base = when (effectiveLayout()) {
+            KbLayout.FLOATING -> 2
+            KbLayout.SPLIT -> 6
+            else -> if (screenWidthDp() < 380) 2 else 3
+        }
+        return (base + sideInsetDp).coerceAtLeast(0)
+    }
+
+    private fun currentFloatWidthDp(): Int {
+        val sw = screenWidthDp()
+        val maxW = (sw - 12).coerceAtLeast(240)
+        val minW = 260.coerceAtMost(maxW)
+        return floatWidthDp.coerceIn(minW, maxW)
+    }
+
+    private fun applyRootLayout() {
+        if (!::root.isInitialized || !::container.isInitialized) return
+        val lp = (root.layoutParams as? FrameLayout.LayoutParams)
+            ?: FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        val mode = effectiveLayout()
+        val sw = screenWidthDp()
+        if (mode == KbLayout.FLOATING) {
+            val w = dp(currentFloatWidthDp())
+            val maxStart = (sw - pxToDp(w) - 4).coerceAtLeast(0)
+            floatMarginStartDp = floatMarginStartDp.coerceIn(0, maxStart)
+            val maxBottom = (screenHeightDp() - 120).coerceAtLeast(0)
+            floatMarginBottomDp = floatMarginBottomDp.coerceIn(0, maxBottom)
+            lp.width = w
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            lp.gravity = Gravity.BOTTOM or Gravity.START
+            lp.leftMargin = dp(floatMarginStartDp)
+            lp.rightMargin = 0
+            lp.bottomMargin = dp(floatMarginBottomDp)
+            root.setPadding(dp(3), dp(4), dp(3), dp(6))
+        } else {
+            lp.width = ViewGroup.LayoutParams.MATCH_PARENT
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            lp.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            lp.leftMargin = 0
+            lp.rightMargin = 0
+            lp.bottomMargin = 0
+            val sp = dp(sidePadDp())
+            root.setPadding(sp, dp(4), sp, dp(8))
+        }
+        root.layoutParams = lp
+    }
+
+    private fun pxToDp(px: Int): Int = (px / resources.displayMetrics.density).roundToInt()
+
+    // ---------------------------------------------------------------- bố cục phím
+
+    private fun t(s: String) = Key(Kind.TEXT, s)
+    private fun gap(w: Float = 3.0f) = Key(Kind.SPACER, weight = w)
+    private fun splitGapWeight(): Float = if (screenWidthDp() >= 720) 3.5f else 2.8f
+
+    private fun normalLayout(): List<List<Key>> {
+        val bottomLetters = listOf(
+            Key(Kind.TO_SYMBOLS_1, "123", 1.25f),
+            Key(Kind.LANG, "", 1.0f),
+            Key(Kind.SPACE, "", 5.0f),
+            Key(Kind.ENTER, "return", 1.75f),
+        )
+        val bottomSymbols = listOf(
+            Key(Kind.TO_LETTERS, "ABC", 1.25f),
+            Key(Kind.LANG, "", 1.0f),
+            Key(Kind.SPACE, "", 5.0f),
+            Key(Kind.ENTER, "return", 1.75f),
+        )
+        return when (layer) {
+            Layer.LETTERS -> {
+                val rows = mutableListOf<List<Key>>()
+                if (isWideScreen()) {
+                    rows.add(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0").map { t(it) })
+                }
+                rows.add("qwertyuiop".map { t(it.toString()) })
+                rows.add(
+                    listOf(Key(Kind.SPACER, weight = 0.5f)) +
+                        "asdfghjkl".map { t(it.toString()) } +
+                        listOf(Key(Kind.SPACER, weight = 0.5f))
+                )
+                rows.add(
+                    listOf(Key(Kind.SHIFT, "⇧", 1.25f)) +
+                        "zxcvbnm".map { t(it.toString()) } +
+                        listOf(Key(Kind.DELETE, "⌫", 1.25f))
+                )
+                rows.add(bottomLetters)
+                rows
+            }
+            Layer.SYMBOLS_1 -> listOf(
+                listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0").map { t(it) },
+                listOf("-", "/", ":", ";", "(", ")", "$", "&", "@", "\"").map { t(it) },
+                listOf(Key(Kind.TO_SYMBOLS_2, "#+=", 1.25f)) +
+                    listOf(".", ",", "?", "!", "'").map { t(it) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
+                bottomSymbols,
+            )
+            Layer.SYMBOLS_2 -> listOf(
+                listOf("[", "]", "{", "}", "#", "%", "^", "*", "+", "=").map { t(it) },
+                listOf("_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•").map { t(it) },
+                listOf(Key(Kind.TO_SYMBOLS_1, "123", 1.25f)) +
+                    listOf(".", ",", "?", "!", "'").map { t(it) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
+                bottomSymbols,
+            )
+        }
+    }
+
+    /** Tách đôi kiểu Gboard (màn hình trong): dãy số, G/V lặp, dấu cách liền 1 phím. */
+    private fun splitLayout(): List<List<Key>> {
+        val g = splitGapWeight()
+        val spaceW = 5.0f + g
+        val bottomLetters = listOf(
+            Key(Kind.TO_SYMBOLS_1, "123", 1.25f),
+            Key(Kind.LANG, "", 1.0f),
+            Key(Kind.SPACE, "", spaceW),
+            Key(Kind.ENTER, "return", 1.75f),
+        )
+        val bottomSymbols = listOf(
+            Key(Kind.TO_LETTERS, "ABC", 1.25f),
+            Key(Kind.LANG, "", 1.0f),
+            Key(Kind.SPACE, "", spaceW),
+            Key(Kind.ENTER, "return", 1.75f),
+        )
+        return when (layer) {
+            Layer.LETTERS -> listOf(
+                listOf("1", "2", "3", "4", "5").map { t(it) } + gap(g) +
+                    listOf("6", "7", "8", "9", "0").map { t(it) },
+                "qwert".map { t(it.toString()) } + gap(g) + "yuiop".map { t(it.toString()) },
+                listOf(Key(Kind.SPACER, weight = 0.25f)) +
+                    "asdfg".map { t(it.toString()) } + gap(g) +
+                    "ghjkl".map { t(it.toString()) } + // G lặp bên trái H
+                    listOf(Key(Kind.SPACER, weight = 0.25f)),
+                listOf(Key(Kind.SHIFT, "⇧", 1.25f)) +
+                    "zxcv".map { t(it.toString()) } + gap(g) + // V lặp bên phải C
+                    "vbnm".map { t(it.toString()) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
+                bottomLetters,
+            )
+            Layer.SYMBOLS_1 -> listOf(
+                listOf("1", "2", "3", "4", "5").map { t(it) } + gap(g) +
+                    listOf("6", "7", "8", "9", "0").map { t(it) },
+                listOf("-", "/", ":", ";", "(").map { t(it) } + gap(g) +
+                    listOf(")", "$", "&", "@", "\"").map { t(it) },
+                listOf(Key(Kind.TO_SYMBOLS_2, "#+=", 1.25f)) +
+                    listOf(".", ",").map { t(it) } + gap(g) +
+                    listOf("?", "!", "'").map { t(it) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
+                bottomSymbols,
+            )
+            Layer.SYMBOLS_2 -> listOf(
+                listOf("[", "]", "{", "}", "#").map { t(it) } + gap(g) +
+                    listOf("%", "^", "*", "+", "=").map { t(it) },
+                listOf("_", "\\", "|", "~", "<").map { t(it) } + gap(g) +
+                    listOf(">", "€", "£", "¥", "•").map { t(it) },
+                listOf(Key(Kind.TO_SYMBOLS_1, "123", 1.25f)) +
+                    listOf(".", ",").map { t(it) } + gap(g) +
+                    listOf("?", "!", "'").map { t(it) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
+                bottomSymbols,
+            )
+        }
+    }
+
+    private fun activeLayout(): List<List<Key>> =
+        if (effectiveLayout() == KbLayout.SPLIT) splitLayout() else normalLayout()
+
+    // ---------------------------------------------------------------- màu sắc & giao diện
+
+    private fun currentColor(): KbColor = kbColors[kbColorIndex.coerceIn(kbColors.indices)]
+    private fun isDark(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
+    private fun colors(): Colors {
+        val dark = isDark()
+        val accent = currentColor().accent
+        return if (kbStyle == "samsung") samsungColors(dark, accent) else iphoneColors(dark, accent)
+    }
+
+    private fun iphoneColors(dark: Boolean, accent: Int): Colors {
+        val kc = currentColor()
+        return if (dark) {
+            Colors(
+                background = if (kc.darkTint != 0) kc.darkTint else Color.parseColor("#1C1C1E"),
+                key = Color.parseColor("#636366"), special = Color.parseColor("#48484A"),
+                pressedKey = Color.parseColor("#8E8E93"), pressedSpecial = Color.parseColor("#636366"),
+                text = Color.WHITE, specialText = Color.WHITE, accent = accent,
+                popupBg = Color.parseColor("#636366"), popupText = Color.WHITE,
+                panel = Color.parseColor("#2C2C2E"), keyStroke = 0,
+            )
+        } else {
+            val baseBg = Color.parseColor("#D1D3D9")
+            val bg = if (kc.lightTint != 0) blend(baseBg, kc.lightTint, 0.25f) else baseBg
+            Colors(
+                background = bg, key = Color.WHITE, special = Color.parseColor("#ADB3BC"),
+                pressedKey = Color.parseColor("#BFC3C9"), pressedSpecial = Color.parseColor("#8E959D"),
+                text = Color.BLACK, specialText = Color.BLACK, accent = accent,
+                popupBg = Color.WHITE, popupText = Color.BLACK,
+                panel = Color.parseColor("#E5E6EA"), keyStroke = 0,
+            )
+        }
+    }
+
+    private fun samsungColors(dark: Boolean, accent: Int): Colors {
+        val kc = currentColor()
+        return if (dark) {
+            val baseBg = Color.parseColor("#010101")
+            val bg = if (kc.darkTint != 0) blend(baseBg, kc.darkTint, 0.35f) else baseBg
+            Colors(
+                background = bg, key = Color.parseColor("#3A3A3C"), special = Color.parseColor("#2C2C2E"),
+                pressedKey = Color.parseColor("#555557"), pressedSpecial = Color.parseColor("#444446"),
+                text = Color.parseColor("#F5F5F5"), specialText = Color.parseColor("#F5F5F5"), accent = accent,
+                popupBg = Color.parseColor("#4A4A4C"), popupText = Color.WHITE,
+                panel = Color.parseColor("#1C1C1E"), keyStroke = 0,
+            )
+        } else {
+            val baseBg = Color.parseColor("#F0F0F0")
+            val bg = if (kc.lightTint != 0) blend(baseBg, kc.lightTint, 0.20f) else baseBg
+            Colors(
+                background = bg, key = Color.WHITE, special = Color.parseColor("#E1E3E6"),
+                pressedKey = Color.parseColor("#D5D7DA"), pressedSpecial = Color.parseColor("#C8CBD0"),
+                text = Color.parseColor("#191919"), specialText = Color.parseColor("#191919"), accent = accent,
+                popupBg = Color.WHITE, popupText = Color.parseColor("#191919"),
+                panel = Color.parseColor("#E6E8EB"), keyStroke = Color.parseColor("#E0E0E0"),
+            )
+        }
+    }
+
+    private fun blend(base: Int, tint: Int, amount: Float): Int {
+        if (tint == 0) return base
+        val inv = 1f - amount
+        val r = (Color.red(base) * inv + Color.red(tint) * amount).roundToInt().coerceIn(0, 255)
+        val g = (Color.green(base) * inv + Color.green(tint) * amount).roundToInt().coerceIn(0, 255)
+        val b = (Color.blue(base) * inv + Color.blue(tint) * amount).roundToInt().coerceIn(0, 255)
+        return Color.rgb(r, g, b)
+    }
+
+    private fun keyCornerDp(): Int = if (kbStyle == "samsung") 8 else 5
+    private fun panelCornerDp(): Int = if (kbStyle == "samsung") 10 else 8
+
+    // ---------------------------------------------------------------- dựng giao diện
+
+    private fun rebuild() {
+        if (!::root.isInitialized) return
+        val c = colors()
+        applyRootLayout()
+        root.removeAllViews()
+        root.setBackgroundColor(c.background)
+
+        if (showKbSettings) root.addView(buildAdjustBar(c))
+        root.addView(buildToolbar(c))
+
+        val rowH = effectiveKeyHeight()
+        val textScale = (rowH / 52f).coerceIn(0.85f, 1.2f)
+        val rowBottom = if (keyVGapDp <= 1) 0 else 1
+        for (row in activeLayout()) {
+            val rowView = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(rowH))
+                    .apply { bottomMargin = dp(rowBottom) }
+            }
+            for (key in row) rowView.addView(makeKeyView(key, c, textScale))
+            root.addView(rowView)
+        }
+        popup.setTextColor(c.popupText)
+        popup.background = rounded(c.popupBg, 10)
+    }
+
+    private fun buildAdjustBar(c: Colors): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(c.panel)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
+        val wide = isWideScreen()
+        val eff = effectiveLayout()
+        val orientLabel = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "Ngang" else "Dọc"
+        val screenLabel = if (wide) "Màn hình trong" else "Màn hình ngoài"
+
+        val row1 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
+        }
+        if (wide) {
+            row1.addView(chip("Bình thường", 1.1f, c, accent = eff == KbLayout.NORMAL) { setWideLayout("normal") })
+            row1.addView(chip("Tách đôi", 1.0f, c, accent = eff == KbLayout.SPLIT) { setWideLayout("split") })
+            row1.addView(chip("Nổi", 0.7f, c, accent = eff == KbLayout.FLOATING) { setWideLayout("floating") })
+        } else {
+            row1.addView(labelChip("$screenLabel - $orientLabel (riêng)", 2.8f, c))
+        }
+        row1.addView(chip("Đóng", 0.8f, c) { showKbSettings = false; rebuild() })
+        bar.addView(row1)
+
+        val row2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36))
+        }
+        row2.addView(labelChip("Cao", 0.5f, c))
+        row2.addView(chip("−", 0.4f, c) { adjustHeight(-2) })
+        row2.addView(labelChip("${effectiveKeyHeight()}", 0.4f, c))
+        row2.addView(chip("+", 0.4f, c) { adjustHeight(2) })
+        row2.addView(chip("Âm: ${soundModes[soundMode]}", 1.3f, c) { cycleSound() })
+        row2.addView(chip(if (autoCorrect) "Sửa lỗi: Bật" else "Sửa lỗi: Tắt", 1.2f, c, accent = autoCorrect) { toggleAutoCorrect() })
+        bar.addView(row2)
+
+        val row3 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36))
+        }
+        val styleLabel = if (kbStyle == "samsung") "Giao diện: Samsung" else "Giao diện: iPhone"
+        row3.addView(chip(styleLabel, 1.3f, c) { cycleStyle() })
+        row3.addView(chip("Màu: ${currentColor().name}", 1.1f, c) { cycleColor() })
+        val tuneLabel = if (showDeepTune) "Tinh chỉnh ▲" else "Tinh chỉnh ▼"
+        row3.addView(chip(tuneLabel, 0.9f, c, accent = showDeepTune) { showDeepTune = !showDeepTune; rebuild() })
+        bar.addView(row3)
+
+        if (showDeepTune) {
+            val row4 = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36))
+            }
+            row4.addView(labelChip("Lề", 0.45f, c)); row4.addView(chip("−", 0.4f, c) { adjustSideInset(-2) })
+            row4.addView(labelChip("$sideInsetDp", 0.35f, c)); row4.addView(chip("+", 0.4f, c) { adjustSideInset(2) })
+            row4.addView(labelChip("Ngang", 0.55f, c)); row4.addView(chip("−", 0.4f, c) { adjustHGap(-1) })
+            row4.addView(labelChip("$keyHGapDp", 0.3f, c)); row4.addView(chip("+", 0.4f, c) { adjustHGap(1) })
+            row4.addView(labelChip("Dọc", 0.45f, c)); row4.addView(chip("−", 0.4f, c) { adjustVGap(-1) })
+            row4.addView(labelChip("$keyVGapDp", 0.3f, c)); row4.addView(chip("+", 0.4f, c) { adjustVGap(1) })
+            bar.addView(row4)
+
+            val row5 = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30))
+            }
+            row5.addView(labelChip("Đang chỉnh: $screenLabel - $orientLabel (riêng). Lề: mép→giữa, Ngang/Dọc: khoảng cách phím", 4f, c))
+            bar.addView(row5)
+        }
+
+        if (eff == KbLayout.FLOATING) {
+            val drag = TextView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
+                text = "⠿  Kéo để di chuyển bàn phím"
+                gravity = Gravity.CENTER
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextColor(c.text)
+                setBackgroundColor(adjustAlpha(c.special, 180))
+                setOnTouchListener(DragTouchListener())
+            }
+            bar.addView(drag)
+
+            val nudge = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
+            }
+            nudge.addView(chip("←", 1f, c) { nudgeFloat(-12, 0) })
+            nudge.addView(chip("→", 1f, c) { nudgeFloat(12, 0) })
+            nudge.addView(chip("↑", 1f, c) { nudgeFloat(0, 12) })
+            nudge.addView(chip("↓", 1f, c) { nudgeFloat(0, -12) })
+            nudge.addView(chip("Rộng −", 1f, c) { adjustFloatWidth(-12) })
+            nudge.addView(chip("Rộng +", 1f, c) { adjustFloatWidth(12) })
+            bar.addView(nudge)
+        }
+        return bar
+    }
+
+    private fun cycleStyle() { kbStyle = if (kbStyle == "iphone") "samsung" else "iphone"; saveString("style", kbStyle); rebuild() }
+    private fun cycleColor() { kbColorIndex = (kbColorIndex + 1) % kbColors.size; saveInt("color", kbColorIndex); rebuild() }
+    private fun cycleSound() { soundMode = (soundMode + 1) % soundModes.size; saveInt("sound", soundMode); rebuild() }
+    private fun toggleAutoCorrect() { autoCorrect = !autoCorrect; saveBool("autocorrect", autoCorrect); rebuild() }
+    private fun setWideLayout(mode: String) { wideLayoutPref = mode; saveString("layout", mode); rebuild() }
+
+    private inner class DragTouchListener : View.OnTouchListener {
+        private var startRawX = 0f
+        private var startRawY = 0f
+        private var startMarginStart = 0
+        private var startMarginBottom = 0
+        override fun onTouch(v: View, ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startRawX = ev.rawX; startRawY = ev.rawY
+                    startMarginStart = floatMarginStartDp; startMarginBottom = floatMarginBottomDp
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dxDp = pxToDp((ev.rawX - startRawX).roundToInt())
+                    val dyDp = pxToDp((ev.rawY - startRawY).roundToInt())
+                    floatMarginStartDp = startMarginStart + dxDp
+                    floatMarginBottomDp = startMarginBottom - dyDp
+                    saveFloatState(); applyRootLayout(); return true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return true
+            }
+            return false
+        }
+    }
+
+    private fun nudgeFloat(dx: Int, dy: Int) { floatMarginStartDp += dx; floatMarginBottomDp += dy; saveFloatState(); applyRootLayout() }
+    private fun adjustFloatWidth(delta: Int) { floatWidthDp += delta; saveInt("fw", floatWidthDp); applyRootLayout() }
+    private fun saveFloatState() {
+        prefs().edit().putInt(pkey("fx"), floatMarginStartDp).putInt(pkey("fy"), floatMarginBottomDp).apply()
+    }
+    private fun adjustHeight(delta: Int) { keyHeightPref = (keyHeightPref + delta).coerceIn(36, 78); saveInt("height", keyHeightPref); rebuild() }
+    private fun adjustSideInset(delta: Int) { sideInsetDp = (sideInsetDp + delta).coerceIn(0, 60); saveInt("inset", sideInsetDp); rebuild() }
+    private fun adjustHGap(delta: Int) { keyHGapDp = (keyHGapDp + delta).coerceIn(0, 10); saveInt("hgap", keyHGapDp); rebuild() }
+    private fun adjustVGap(delta: Int) { keyVGapDp = (keyVGapDp + delta).coerceIn(0, 10); saveInt("vgap", keyVGapDp); rebuild() }
+    private fun adjustAlpha(color: Int, alpha: Int): Int = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+
+    private fun displayLabel(key: Key): String =
+        if (key.kind == Kind.TEXT && layer == Layer.LETTERS && shift != Shift.OFF) key.label.uppercase() else key.label
+
+    private fun enterLabel(): String {
+        val info = currentInputEditorInfo ?: return "return"
+        val options = info.imeOptions
+        val action = options and EditorInfo.IME_MASK_ACTION
+        val noEnterAction = (options and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
+        if (noEnterAction) return "return"
+        return when (action) {
+            EditorInfo.IME_ACTION_GO -> "Go"
+            EditorInfo.IME_ACTION_SEARCH -> "Tìm"
+            EditorInfo.IME_ACTION_SEND -> "Gửi"
+            EditorInfo.IME_ACTION_NEXT -> "Tiếp"
+            EditorInfo.IME_ACTION_DONE -> "Xong"
+            else -> "return"
+        }
+    }
+
+    private fun keyLabel(key: Key): String = when {
+        key.kind == Kind.SHIFT && shift == Shift.LOCK -> "⇪"
+        key.kind == Kind.SHIFT -> "⇧"
+        key.kind == Kind.LANG -> if (vietnamese) "VI" else "EN"
+        key.kind == Kind.SPACE -> "space"
+        key.kind == Kind.ENTER -> enterLabel()
+        else -> displayLabel(key)
+    }
+
+    private fun makeKeyView(key: Key, c: Colors, textScale: Float): View {
+        val hMargin = keyHGapDp.coerceAtLeast(0)
+        val vMargin = keyVGapDp.coerceAtLeast(0)
+        val params = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, key.weight)
+            .apply { setMargins(dp(hMargin), dp(vMargin), dp(hMargin), dp(vMargin)) }
+        if (key.kind == Kind.SPACER) return View(this).apply { layoutParams = params }
+
+        val isEnter = key.kind == Kind.ENTER
+        val isSpecial = key.kind != Kind.TEXT && key.kind != Kind.SPACE
+        val baseColor = when { isEnter -> c.accent; isSpecial -> c.special; else -> c.key }
+        val pressedColor = when { isEnter -> lightenPress(c.accent); isSpecial -> c.pressedSpecial; else -> c.pressedKey }
+        val textColor = if (isEnter) Color.WHITE else c.text
+        val radius = keyCornerDp()
+
+        return TextView(this).apply {
+            layoutParams = params
+            text = keyLabel(key)
+            gravity = Gravity.CENTER
+            setTextColor(textColor)
+            typeface = if (key.kind == Kind.TEXT) Typeface.DEFAULT else Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, when (key.kind) {
+                Kind.TEXT -> 22f * textScale; Kind.SPACE -> 15f * textScale; Kind.ENTER -> 15f * textScale; else -> 17f * textScale
+            })
+            background = rounded(baseColor, radius, c.keyStroke)
+            elevation = if (key.kind == Kind.TEXT || key.kind == Kind.SPACE) dp(1).toFloat() else 0f
+            isClickable = true
+            isHapticFeedbackEnabled = true
+            setOnTouchListener { v, ev -> handleTouch(v, ev, key, baseColor, pressedColor, radius, c.keyStroke) }
+        }
+    }
+
+    private fun lightenPress(accent: Int): Int {
+        val r = (Color.red(accent) + (255 - Color.red(accent)) * 0.25f).roundToInt().coerceIn(0, 255)
+        val g = (Color.green(accent) + (255 - Color.green(accent)) * 0.25f).roundToInt().coerceIn(0, 255)
+        val b = (Color.blue(accent) + (255 - Color.blue(accent)) * 0.25f).roundToInt().coerceIn(0, 255)
+        return Color.rgb(r, g, b)
+    }
+
+    private fun rounded(color: Int, radiusDp: Int = 5, stroke: Int = 0) = GradientDrawable().apply {
+        shape = GradientRectangle.RECTANGLE
+        cornerRadius = dp(radiusDp).toFloat()
+        setColor(color)
+        if (stroke != 0) setStroke(dp(1).coerceAtLeast(1), stroke)
+    } /* fixed below */ 
+   
+    // ---------------------------------------------------------------- (rounded helper fixed in-place via correct code below)
+
+} /* placeholder end - will be replaced */ 

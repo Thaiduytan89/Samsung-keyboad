@@ -6,7 +6,7 @@ Bàn phím Android (giao diện kiểu iPhone/Samsung), viết bằng Kotlin. Kh
 
 - **Giao diện**: chọn kiểu **iPhone** (mặc định) hoặc **Samsung** trong bảng tinh chỉnh (⌨).
 - **Đổi màu bàn phím**: nhiều tông màu (Mặc định, Xanh dương, Xanh lá, Xanh ngọc, Tím, Hồng, Cam, Xám), áp dụng cho cả iPhone & Samsung, tự theo sáng/tối hệ thống.
-- **Popup ký tự** hiện lên khi nhấn phím với hiệu ứng hiện/ẩn mượt (kiểu iPhone).
+- **Popup ký tự** hiện lên khi nhấn phím với hiệu ứng hiện/ẩn mượt (kiểu iPhone). Trên **màn hình trong** popup được **phóng to gấp đôi** (khung và chữ to gấp 2) để dễ nhìn khi gõ hai tay.
 - Phản hồi **rung/haptic** và **âm thanh gõ** khi gõ phím (âm thanh có nhiều lựa chọn).
 - Bố cục QWERTY.
 - **Shift**: chạm 1 lần = viết hoa 1 chữ, chạm đúp = Caps Lock.
@@ -57,14 +57,14 @@ Bàn phím Android (giao diện kiểu iPhone/Samsung), viết bằng Kotlin. Kh
 ## Nhập liệu giọng nói
 
 - **🎤 (Mic)**: nhập liệu giọng nói bằng **tiếng Việt**. Lời nói được nhận dạng và **hiện song song (trực tiếp) lên khung chat** trong khi bạn đang nói, và chốt văn bản khi kết thúc.
-- **VI→EN**: nói bằng **tiếng Việt**, tự dịch sang **tiếng Anh** và **hiện song song (trực tiếp) lên khung chat** ngay khi bạn nói; kết quả cuối cùng được chèn thẳng vào khung chat/ô nhập (nếu dịch lỗi sẽ chèn nguyên văn tiếng Việt và báo trạng thái).
+- **VI→EN**: nói bằng **tiếng Việt**, tự dịch sang **tiếng Anh** và **hiện song song (trực tiếp) lên khung chat** ngay khi bạn nói. Khi bấm lại nút **⏹** để **ngắt thu âm**, bản dịch tiếng Anh được **chuyển dịch và chèn ngay lập tức** lên khung chat (nếu dịch lỗi sẽ chèn nguyên văn tiếng Việt và báo trạng thái).
 - Cần quyền **Microphone** (`RECORD_AUDIO`) và **mạng/Internet**. Nhận dạng giọng nói và dịch sử dụng dịch vụ của Google trên thiết bị/mạng (kết quả và độ trễ phụ thuộc thiết bị, kết nối).
 
 ## Dịch
 
 Bấm nút **Dịch** trên thanh phía trên bàn phím:
 
-- Khi mở bảng **Dịch**, bạn có thể **gõ/sửa/xóa trực tiếp trong khung nhập** và nội dung sẽ **hiện thẳng, song song lên khung chat/ô nhập** của ứng dụng; bản dịch xem trước hiển thị trong bảng.
+- Khi mở bảng **Dịch**, bạn **gõ trực tiếp vào ô văn bản trong bảng**; bản dịch sẽ **hiện thẳng, song song lên khung chat/ô nhập** của ứng dụng ngay khi bạn gõ (không có ô “Bản dịch sẽ hiện ở đây” riêng — mọi kết quả đều đẩy thẳng lên khung chat). Telex tiếng Việt vẫn hoạt động trong ô này.
 - Khi đang soạn văn bản (chưa gửi), bấm **Dịch** sẽ lấy nội dung đang gõ/đang chọn, **dịch và thay thế trực tiếp** vào khung chat/ô nhập.
 - Bấm **Sang: ...** để đổi ngôn ngữ đích giữa English, 繁體中文 (Hoa phồn thể), မြန်မာ (Myanmar) — sẽ dịch và thay thế trực tiếp.
 - Bấm **Dịch** (hoặc phím **Enter/return**) để dịch và thay thế trực tiếp vào khung chat/ô nhập.
