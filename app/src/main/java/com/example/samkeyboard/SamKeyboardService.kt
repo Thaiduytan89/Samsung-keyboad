@@ -3,6 +3,7 @@ package com.example.samkeyboard
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
@@ -17,6 +18,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONArray
@@ -28,11 +30,12 @@ import java.net.URLEncoder
 import java.net.UnknownHostException
 
 /**
- * Bàn phím QWERTY kiểu Samsung:
- *  - Chuyển đổi English / Tiếng Việt (gõ Telex) bằng phím EN/VI
- *  - Dịch sang English, 繁體中文, မြန်မာ (có ô nhập riêng trong bảng dịch, kiểu Gboard/Samsung)
+ * Bàn phím QWERTY (giao diện kiểu iPhone):
+ *  - Chuyển đổi English / Tiếng Việt (gõ Telex) bằng phím VI/EN
+ *  - Dịch sang English, 繁體中文, မြန်မာ: bấm Dịch để dịch và thay thế trực tiếp vào ô chat
  *  - Shift (chạm đúp = Caps Lock), giữ phím xóa để xóa liên tục, tự viết hoa đầu câu,
  *    chạm đúp dấu cách = ". ", 2 trang ký hiệu, giao diện sáng/tối theo hệ thống.
+ *  - Popup phím và phản hồi rung khi gõ.
  */
 class SamKeyboardService : InputMethodService() {
 
@@ -48,15 +51,21 @@ class SamKeyboardService : InputMethodService() {
         val background: Int,
         val key: Int,
         val special: Int,
-        val pressed: Int,
+        val pressedKey: Int,
+        val pressedSpecial: Int,
         val text: Int,
+        val specialText: Int,
         val accent: Int,
+        val popupBg: Int,
+        val popupText: Int,
     )
 
     private class Target(val code: String, val name: String)
 
     private val handler = Handler(Looper.getMainLooper())
+    private lateinit var container: FrameLayout
     private lateinit var root: LinearLayout
+    private lateinit var popup: TextView
 
     private var layer = Layer.LETTERS
     private var shift = Shift.OFF
@@ -71,19 +80,20 @@ class SamKeyboardService : InputMethodService() {
     // Dịch
     private val targets = listOf(
         Target("en", "English"),
-        Target("zh-TW", "繁體中文"), // 繁體中文
-        Target("my", "မြန်မာ"), // မြန်မာ
+        Target("zh-TW", "繁體中文"),
+        Target("my", "မြန်မာ"),
     )
     private var translateOpen = false
     private var translateStatus: String? = null
     private var targetIndex = 0
     private var translateJob = 0
 
-    // Bảng dịch có ô nhập riêng (giống Gboard/Samsung): gõ và dịch ngay trong bàn phím
+    // Bảng dịch: gõ và dịch, bấm Dịch/Enter sẽ thay thế trực tiếp vào ô chat
     private var trCommitted = ""
     private val trTelex = TelexEngine()
     private var trResult = ""
     private var trTranslating = false
+    private var trPendingApply = false
     private var trSnapUseSelection = false
     private var trSnapSelected = ""
     private var trSnapBefore = ""
@@ -106,12 +116,31 @@ class SamKeyboardService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
+        container = FrameLayout(this)
+        popup = TextView(this).apply {
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            elevation = dp(8).toFloat()
+            typeface = Typeface.DEFAULT
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 34f)
+        }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(4), dp(6), dp(4), dp(6))
+            setPadding(dp(3), dp(6), dp(3), dp(8))
         }
+        container.addView(
+            root,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        container.addView(
+            popup,
+            FrameLayout.LayoutParams(dp(56), dp(64)),
+        )
         rebuild()
-        return root
+        return container
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
@@ -127,6 +156,7 @@ class SamKeyboardService : InputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         handler.removeCallbacks(repeatDelete)
+        hidePopup()
         finishTelex()
         resetTranslateState()
         super.onFinishInputView(finishingInput)
@@ -163,52 +193,43 @@ class SamKeyboardService : InputMethodService() {
     private fun t(s: String) = Key(Kind.TEXT, s)
 
     private fun layout(): List<List<Key>> {
-        val numbers = "1234567890".map { t(it.toString()) }
         val bottomLetters = listOf(
-            Key(Kind.TO_SYMBOLS_1, "?123", 1.3f),
-            Key(Kind.LANG, "", 1.2f),
-            t(","),
-            Key(Kind.SPACE, "", 4f),
-            t("."),
-            Key(Kind.ENTER, "↵", 1.5f),
+            Key(Kind.TO_SYMBOLS_1, "123", 1.25f),
+            Key(Kind.LANG, "", 1.0f),
+            Key(Kind.SPACE, "", 5.0f),
+            Key(Kind.ENTER, "return", 1.75f),
         )
         val bottomSymbols = listOf(
-            Key(Kind.TO_LETTERS, "ABC", 1.5f),
-            t(","),
-            Key(Kind.SPACE, "", 5f),
-            t("."),
-            Key(Kind.ENTER, "↵", 1.5f),
+            Key(Kind.TO_LETTERS, "ABC", 1.25f),
+            Key(Kind.LANG, "", 1.0f),
+            Key(Kind.SPACE, "", 5.0f),
+            Key(Kind.ENTER, "return", 1.75f),
         )
         return when (layer) {
             Layer.LETTERS -> listOf(
-                numbers,
                 "qwertyuiop".map { t(it.toString()) },
                 listOf(Key(Kind.SPACER, weight = 0.5f)) +
                     "asdfghjkl".map { t(it.toString()) } +
                     listOf(Key(Kind.SPACER, weight = 0.5f)),
-                listOf(Key(Kind.SHIFT, "⇧", 1.5f)) +
+                listOf(Key(Kind.SHIFT, "⇧", 1.25f)) +
                     "zxcvbnm".map { t(it.toString()) } +
-                    listOf(Key(Kind.DELETE, "⌫", 1.5f)),
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
                 bottomLetters,
             )
             Layer.SYMBOLS_1 -> listOf(
-                numbers,
-                listOf("@", "#", "$", "_", "&", "-", "+", "(", ")", "/").map { t(it) },
-                listOf(Key(Kind.SPACER, weight = 1.5f)) +
-                    listOf("*", "\"", "'", ":", ";", "!", "?").map { t(it) } +
-                    listOf(Key(Kind.SPACER, weight = 1.5f)),
-                listOf(Key(Kind.TO_SYMBOLS_2, "=\\<", 1.5f)) +
-                    listOf("%", "^", "[", "]", "{", "}").map { t(it) } +
-                    listOf(Key(Kind.DELETE, "⌫", 1.5f)),
+                listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0").map { t(it) },
+                listOf("-", "/", ":", ";", "(", ")", "$", "&", "@", "\"").map { t(it) },
+                listOf(Key(Kind.TO_SYMBOLS_2, "#+=", 1.25f)) +
+                    listOf(".", ",", "?", "!", "'").map { t(it) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
                 bottomSymbols,
             )
             Layer.SYMBOLS_2 -> listOf(
-                numbers,
-                listOf("~", "`", "|", "•", "√", "π", "÷", "×", "¶", "∆").map { t(it) },
-                listOf("£", "¢", "€", "¥", "^", "°", "=", "{", "}", "\\").map { t(it) },
-                listOf(Key(Kind.TO_SYMBOLS_1, "?123", 1.5f)) +
-                    listOf("%", "©", "®", "™", "[", "]").map { t(it) } +
-                    listOf(Key(Kind.DELETE, "⌫", 1.5f)),
+                listOf("[", "]", "{", "}", "#", "%", "^", "*", "+", "=").map { t(it) },
+                listOf("_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•").map { t(it) },
+                listOf(Key(Kind.TO_SYMBOLS_1, "123", 1.25f)) +
+                    listOf(".", ",", "?", "!", "'").map { t(it) } +
+                    listOf(Key(Kind.DELETE, "⌫", 1.25f)),
                 bottomSymbols,
             )
         }
@@ -219,21 +240,29 @@ class SamKeyboardService : InputMethodService() {
             Configuration.UI_MODE_NIGHT_YES
         return if (dark) {
             Colors(
-                background = Color.parseColor("#202124"),
-                key = Color.parseColor("#3C3F44"),
-                special = Color.parseColor("#2A2C30"),
-                pressed = Color.parseColor("#5A5E65"),
-                text = Color.parseColor("#F1F1F1"),
-                accent = Color.parseColor("#3E91FF"),
+                background = Color.parseColor("#1C1C1E"),
+                key = Color.parseColor("#636366"),
+                special = Color.parseColor("#48484A"),
+                pressedKey = Color.parseColor("#8E8E93"),
+                pressedSpecial = Color.parseColor("#636366"),
+                text = Color.WHITE,
+                specialText = Color.WHITE,
+                accent = Color.parseColor("#0A84FF"),
+                popupBg = Color.parseColor("#636366"),
+                popupText = Color.WHITE,
             )
         } else {
             Colors(
-                background = Color.parseColor("#E9EAEE"),
+                background = Color.parseColor("#D1D3D9"),
                 key = Color.WHITE,
-                special = Color.parseColor("#D4D6DD"),
-                pressed = Color.parseColor("#BFC3CC"),
-                text = Color.parseColor("#1B1B1B"),
-                accent = Color.parseColor("#3E91FF"),
+                special = Color.parseColor("#ADB3BC"),
+                pressedKey = Color.parseColor("#BFC3C9"),
+                pressedSpecial = Color.parseColor("#8E959D"),
+                text = Color.BLACK,
+                specialText = Color.BLACK,
+                accent = Color.parseColor("#007AFF"),
+                popupBg = Color.WHITE,
+                popupText = Color.BLACK,
             )
         }
     }
@@ -250,13 +279,16 @@ class SamKeyboardService : InputMethodService() {
         for (row in layout()) {
             val rowView = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
-                )
+                ).apply { bottomMargin = dp(1) }
             }
             for (key in row) rowView.addView(makeKeyView(key, c))
             root.addView(rowView)
         }
+        popup.setTextColor(c.popupText)
+        popup.background = rounded(c.popupBg, 10)
     }
 
     private fun displayLabel(key: Key): String =
@@ -264,67 +296,107 @@ class SamKeyboardService : InputMethodService() {
             key.label.uppercase()
         } else key.label
 
+    private fun enterLabel(): String {
+        val info = currentInputEditorInfo ?: return "return"
+        val options = info.imeOptions
+        val action = options and EditorInfo.IME_MASK_ACTION
+        val noEnterAction = (options and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
+        if (noEnterAction) return "return"
+        return when (action) {
+            EditorInfo.IME_ACTION_GO -> "Go"
+            EditorInfo.IME_ACTION_SEARCH -> "Tìm"
+            EditorInfo.IME_ACTION_SEND -> "Gửi"
+            EditorInfo.IME_ACTION_NEXT -> "Tiếp"
+            EditorInfo.IME_ACTION_DONE -> "Xong"
+            else -> "return"
+        }
+    }
+
     private fun keyLabel(key: Key): String = when {
         key.kind == Kind.SHIFT && shift == Shift.LOCK -> "⇪"
+        key.kind == Kind.SHIFT -> "⇧"
         key.kind == Kind.LANG -> if (vietnamese) "VI" else "EN"
-        key.kind == Kind.SPACE -> if (vietnamese) "Tiếng Việt" else "English"
+        key.kind == Kind.SPACE -> "space"
+        key.kind == Kind.ENTER -> enterLabel()
         else -> displayLabel(key)
     }
 
     private fun makeKeyView(key: Key, c: Colors): View {
         val params = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, key.weight)
-            .apply { setMargins(dp(2), dp(3), dp(2), dp(3)) }
+            .apply { setMargins(dp(3), dp(4), dp(3), dp(4)) }
 
         if (key.kind == Kind.SPACER) {
             return View(this).apply { layoutParams = params }
         }
 
-        val isAccent = key.kind == Kind.ENTER ||
-            (key.kind == Kind.SHIFT && shift != Shift.OFF)
+        val isEnter = key.kind == Kind.ENTER
         val isSpecial = key.kind != Kind.TEXT && key.kind != Kind.SPACE
         val baseColor = when {
-            isAccent -> c.accent
+            isEnter -> c.accent
             isSpecial -> c.special
             else -> c.key
         }
+        val pressedColor = when {
+            isEnter -> Color.parseColor(if (isDark()) "#409CFF" else "#005EC4")
+            isSpecial -> c.pressedSpecial
+            else -> c.pressedKey
+        }
+        val textColor = if (isEnter) Color.WHITE else c.text
 
         return TextView(this).apply {
             layoutParams = params
             text = keyLabel(key)
             gravity = Gravity.CENTER
-            setTextColor(if (isAccent) Color.WHITE else c.text)
+            setTextColor(textColor)
+            typeface = if (key.kind == Kind.TEXT) Typeface.DEFAULT else Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
             setTextSize(
                 TypedValue.COMPLEX_UNIT_SP,
                 when (key.kind) {
-                    Kind.TEXT -> 20f
-                    Kind.SPACE -> 13f
-                    else -> 16f
+                    Kind.TEXT -> 22f
+                    Kind.SPACE -> 16f
+                    Kind.ENTER -> 16f
+                    else -> 18f
                 },
             )
-            background = rounded(baseColor)
+            background = rounded(baseColor, 5)
+            elevation = if (key.kind == Kind.TEXT || key.kind == Kind.SPACE) dp(1).toFloat() else 0f
             isClickable = true
-            setOnTouchListener { v, ev -> handleTouch(v, ev, key, baseColor, c) }
+            isHapticFeedbackEnabled = true
+            setOnTouchListener { v, ev -> handleTouch(v, ev, key, baseColor, pressedColor) }
         }
     }
 
-    private fun rounded(color: Int) = GradientDrawable().apply {
+    private fun rounded(color: Int, radiusDp: Int = 5) = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(8).toFloat()
+        cornerRadius = dp(radiusDp).toFloat()
         setColor(color)
     }
 
-    private fun handleTouch(v: View, ev: MotionEvent, key: Key, baseColor: Int, c: Colors): Boolean {
+    private fun isDark(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+
+    private fun handleTouch(
+        v: View, ev: MotionEvent, key: Key, baseColor: Int, pressedColor: Int,
+    ): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                v.background = rounded(c.pressed)
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                v.background = rounded(pressedColor, 5)
+                performKeyHaptic(v)
+                if (key.kind == Kind.TEXT) showPopup(v, keyLabel(key))
                 if (key.kind == Kind.DELETE) {
                     deleteOnce()
                     handler.postDelayed(repeatDelete, 400)
                 }
             }
+            MotionEvent.ACTION_MOVE -> {
+                val inside = ev.x >= 0 && ev.x <= v.width && ev.y >= 0 && ev.y <= v.height
+                v.background = rounded(if (inside) pressedColor else baseColor, 5)
+                if (!inside) hidePopup()
+            }
             MotionEvent.ACTION_UP -> {
-                v.background = rounded(baseColor)
+                v.background = rounded(baseColor, 5)
+                hidePopup()
                 if (key.kind == Kind.DELETE) {
                     handler.removeCallbacks(repeatDelete)
                     refreshShift()
@@ -334,11 +406,44 @@ class SamKeyboardService : InputMethodService() {
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
-                v.background = rounded(baseColor)
+                v.background = rounded(baseColor, 5)
+                hidePopup()
                 handler.removeCallbacks(repeatDelete)
             }
         }
         return true
+    }
+
+    private fun performKeyHaptic(v: View) {
+        val ok = if (android.os.Build.VERSION.SDK_INT >= 27) {
+            v.performHapticFeedback(
+                HapticFeedbackConstants.KEYBOARD_PRESS,
+                HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING or
+                    HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING,
+            ) || v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_PRESS)
+        } else {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        }
+        if (!ok) v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    private fun showPopup(anchor: View, text: String) {
+        if (!::popup.isInitialized || !::container.isInitialized) return
+        popup.text = text
+        popup.visibility = View.VISIBLE
+        popup.bringToFront()
+        val lp = popup.layoutParams as FrameLayout.LayoutParams
+        lp.width = dp(if (text.length <= 1) 56 else 72)
+        lp.height = dp(64)
+        val ax = anchor.left + anchor.width / 2 - lp.width / 2
+        val ay = anchor.top - lp.height - dp(6)
+        lp.leftMargin = ax.coerceIn(dp(2), (container.width - lp.width - dp(2)).coerceAtLeast(dp(2)))
+        lp.topMargin = ay.coerceAtLeast(dp(2))
+        popup.layoutParams = lp
+    }
+
+    private fun hidePopup() {
+        if (::popup.isInitialized) popup.visibility = View.GONE
     }
 
     // ---------------------------------------------------------------- gõ tiếng Việt (Telex)
@@ -493,7 +598,7 @@ class SamKeyboardService : InputMethodService() {
         if (shift != before || forceRebuild) rebuild()
     }
 
-    // ---------------------------------------------------------------- bảng dịch (giống Gboard/Samsung)
+    // ---------------------------------------------------------------- bảng dịch
 
     private fun trSourceText(): String = trCommitted + trTelex.text()
 
@@ -508,6 +613,7 @@ class SamKeyboardService : InputMethodService() {
         handler.removeCallbacks(trAutoTranslate)
         translateOpen = false
         trTranslating = false
+        trPendingApply = false
         translateStatus = null
         trResult = ""
         trCommitted = ""
@@ -535,11 +641,13 @@ class SamKeyboardService : InputMethodService() {
         trResult = ""
         translateStatus = null
         trTranslating = false
+        trPendingApply = false
         translateOpen = true
         layer = Layer.LETTERS
         rebuild()
         if (source.isNotBlank()) {
-            translateNow(auto = true)
+            // Tự dịch và thay thế trực tiếp lên ô chat khi bấm Dịch
+            translateNow(auto = false)
         }
     }
 
@@ -549,6 +657,7 @@ class SamKeyboardService : InputMethodService() {
         translateJob++
         translateOpen = false
         trTranslating = false
+        trPendingApply = false
         translateStatus = null
         trResult = ""
         trCommitted = ""
@@ -583,7 +692,8 @@ class SamKeyboardService : InputMethodService() {
             }
             Kind.ENTER -> {
                 finishTrTelex()
-                translateNow()
+                // Dịch và thay thế trực tiếp lên ô chat
+                translateNow(auto = false)
                 return
             }
             Kind.DELETE -> {
@@ -637,10 +747,10 @@ class SamKeyboardService : InputMethodService() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(40),
                 )
             }
-            bar.addView(chip("Dịch", 1.6f, c) { openTranslate() })
+            bar.addView(chip("Dịch", 1.4f, c) { openTranslate() })
             bar.addView(View(this).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.MATCH_PARENT, 6f,
@@ -663,55 +773,52 @@ class SamKeyboardService : InputMethodService() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(40),
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
             )
         }
-        control.addView(chip("Sang: " + targets[targetIndex].name, 2.6f, c) {
+        control.addView(chip("Sang: " + targets[targetIndex].name, 2.8f, c) {
             targetIndex = (targetIndex + 1) % targets.size
             rebuild()
-            if (trSourceText().isNotBlank()) translateNow()
+            // Đổi ngôn ngữ đích -> dịch và thay thế trực tiếp
+            if (trSourceText().isNotBlank()) translateNow(auto = false)
         })
         val actionLabel = when {
             trTranslating -> "Đang dịch..."
             translateStatus != null && trResult.isEmpty() -> translateStatus!!
             else -> "Dịch"
         }
-        control.addView(chip(actionLabel, 1.4f, c, accent = true) { translateNow() })
+        control.addView(chip(actionLabel, 1.4f, c, accent = true) {
+            // Bấm Dịch -> dịch và thay thế trực tiếp lên ô chat
+            translateNow(auto = false)
+        })
         control.addView(chip("✕", 0.7f, c) { closeTranslate() })
         panel.addView(control)
 
         val srcText = trSourceText()
         val srcView = TextView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
-            ).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) }
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40),
+            ).apply { setMargins(dp(3), dp(2), dp(3), dp(2)) }
             text = if (srcText.isEmpty()) "Nhập văn bản cần dịch..." else srcText
             setTextColor(if (srcText.isEmpty()) Color.GRAY else c.text)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
             setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = rounded(c.key)
+            background = rounded(c.key, 8)
             maxLines = 2
         }
         panel.addView(srcView)
 
-        val resultRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(42),
-            )
-        }
         val resLabel = when {
             trTranslating -> "Đang dịch..."
             trResult.isNotEmpty() -> trResult
             translateStatus != null -> translateStatus!!
             else -> "Bản dịch sẽ hiện ở đây"
         }
-        resultRow.addView(TextView(this).apply {
+        val resView = TextView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.MATCH_PARENT, 3.2f,
-            ).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) }
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
+            ).apply { setMargins(dp(3), dp(2), dp(3), dp(4)) }
             text = resLabel
             setTextColor(
                 if (trResult.isNotEmpty() && !trTranslating) c.text else Color.GRAY
@@ -719,13 +826,10 @@ class SamKeyboardService : InputMethodService() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(4), dp(10), dp(4))
-            background = rounded(c.special)
+            background = rounded(c.special, 8)
             maxLines = 2
-        })
-        resultRow.addView(
-            chip("Thay thế", 1.3f, c, accent = trResult.isNotEmpty()) { applyTranslation() }
-        )
-        panel.addView(resultRow)
+        }
+        panel.addView(resView)
 
         return panel
     }
@@ -734,15 +838,15 @@ class SamKeyboardService : InputMethodService() {
         label: String, weight: Float, c: Colors, accent: Boolean = false, onClick: () -> Unit,
     ): View = TextView(this).apply {
         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight)
-            .apply { setMargins(dp(2), dp(3), dp(2), dp(5)) }
+            .apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }
         text = label
         gravity = Gravity.CENTER
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         setTextColor(if (accent) Color.WHITE else c.text)
-        background = rounded(if (accent) c.accent else c.special)
+        background = rounded(if (accent) c.accent else c.special, 8)
         isClickable = true
         setOnClickListener {
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            performKeyHaptic(it)
             onClick()
         }
     }
@@ -764,7 +868,8 @@ class SamKeyboardService : InputMethodService() {
 
     /**
      * Dịch nội dung trong ô nhập của bảng dịch (tự nhận diện ngôn ngữ nguồn).
-     * Khi mở bảng dịch sẽ tự lấy và dịch văn bản đang soạn/chọn trong ô nhập.
+     * auto=false (bấm Dịch/Enter/đổi ngôn ngữ): khi có kết quả sẽ thay thế trực tiếp vào ô chat.
+     * auto=true (tự dịch khi gõ): chỉ hiển thị bản dịch xem trước.
      */
     private fun translateNow(auto: Boolean = false) {
         handler.removeCallbacks(trAutoTranslate)
@@ -782,6 +887,7 @@ class SamKeyboardService : InputMethodService() {
         val job = ++translateJob
         val target = targets[targetIndex].code
         trTranslating = true
+        trPendingApply = !auto
         translateStatus = "Đang dịch..."
         trResult = ""
         rebuild()
@@ -812,14 +918,21 @@ class SamKeyboardService : InputMethodService() {
     private fun onTrTranslated(job: Int, out: String?, err: String) {
         if (job != translateJob) return
         trTranslating = false
+        val shouldApply = trPendingApply
+        trPendingApply = false
         if (out.isNullOrEmpty()) {
             translateStatus = err
             trResult = ""
+            rebuild()
         } else {
-            translateStatus = null
             trResult = out
+            translateStatus = null
+            if (shouldApply) {
+                applyTranslation()
+            } else {
+                rebuild()
+            }
         }
-        rebuild()
     }
 
     /** Thay thế văn bản trong ô nhập của ứng dụng bằng bản dịch. */
@@ -855,7 +968,6 @@ class SamKeyboardService : InputMethodService() {
 
     /**
      * Gọi dịch vụ dịch của Google (không cần khóa API), tự nhận diện ngôn ngữ nguồn.
-     * Chữ cần dịch được gửi lên Google khi bấm nút Dịch.
      */
     private fun requestTranslation(text: String, target: String): String {
         val encodedText = URLEncoder.encode(text, "UTF-8")
