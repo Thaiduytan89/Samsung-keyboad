@@ -32,12 +32,13 @@ import java.net.UnknownHostException
 import kotlin.math.roundToInt
 
 /**
- * Bàn phím QWERTY (giao diện kiểu iPhone) tối ưu cho màn hình gập (Oppo Find N5 trong/ngoài):
- *  - Màn hình trong (rộng): bàn phím tách đôi sang 2 bên để gõ 2 tay.
+ * Bàn phím QWERTY tối ưu cho màn hình gập (Oppo Find N5 trong/ngoài):
+ *  - Màn hình trong (rộng): bàn phím tách đôi sang 2 bên (kiểu Gboard) để gõ 2 tay.
  *  - Màn hình ngoài (gập lại): giao diện bàn phím bình thường.
- *  - Chuyển đổi English / Tiếng Việt (gõ Telex) bằng phím VI/EN
- *  - Dịch sang English, 繁體中文, မြန်မာ: bấm Dịch để dịch và thay thế trực tiếp vào ô chat
- *  - Tùy chỉnh chiều cao phím, popup phím và phản hồi rung khi gõ.
+ *  - Gõ tiếng Việt Telex (QWERTY) và English (phím VI/EN).
+ *  - Dịch sang English, 繁體中文, မြန်မာ: bấm Dịch để dịch và thay thế trực tiếp vào ô chat.
+ *  - Giao diện iPhone (mặc định) / Samsung, đổi màu bàn phím, chỉnh chiều cao.
+ *  - Popup phím và phản hồi rung khi gõ.
  */
 class SamKeyboardService : InputMethodService() {
 
@@ -62,9 +63,12 @@ class SamKeyboardService : InputMethodService() {
         val popupBg: Int,
         val popupText: Int,
         val panel: Int,
+        val keyStroke: Int,
     )
 
     private class Target(val code: String, val name: String)
+
+    private data class KbColor(val name: String, val accent: Int, val lightTint: Int, val darkTint: Int)
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var container: FrameLayout
@@ -76,15 +80,28 @@ class SamKeyboardService : InputMethodService() {
     private var lastShiftTap = 0L
     private var lastSpaceTap = 0L
 
-    // Tùy chỉnh bố cục
+    // Tùy chỉnh bố cục & giao diện
     private var wideLayoutPref = "split" // "normal", "split", "floating" (áp dụng khi màn hình rộng/trong)
     private var keyHeightPref = 52
     private var floatMarginStartDp = 8
     private var floatMarginBottomDp = 8
     private var floatWidthDp = 340
     private var showKbSettings = false
+    private var kbStyle = "iphone" // "iphone", "samsung"
+    private var kbColorIndex = 0
 
-    // Gõ tiếng Việt
+    private val kbColors = listOf(
+        KbColor("Mặc định", Color.parseColor("#007AFF"), 0, 0),
+        KbColor("Xanh dương", Color.parseColor("#007AFF"), Color.parseColor("#D6E4FF"), Color.parseColor("#0A2540")),
+        KbColor("Xanh lá", Color.parseColor("#34C759"), Color.parseColor("#DFF5E3"), Color.parseColor("#0F2E17")),
+        KbColor("Xanh ngọc", Color.parseColor("#00B3A4"), Color.parseColor("#D7F5F2"), Color.parseColor("#0A2E2B")),
+        KbColor("Tím", Color.parseColor("#AF52DE"), Color.parseColor("#F0E0FA"), Color.parseColor("#2A1533")),
+        KbColor("Hồng", Color.parseColor("#FF2D55"), Color.parseColor("#FFE0E8"), Color.parseColor("#33121A")),
+        KbColor("Cam", Color.parseColor("#FF9500"), Color.parseColor("#FFE8CC"), Color.parseColor("#33210A")),
+        KbColor("Xám", Color.parseColor("#8E8E93"), Color.parseColor("#E5E5EA"), Color.parseColor("#2C2C2E")),
+    )
+
+    // Gõ tiếng Việt (Telex trên bố cục QWERTY)
     private val telex = TelexEngine()
     private var vietnamese = true
     private var telexAllowed = true
@@ -131,6 +148,8 @@ class SamKeyboardService : InputMethodService() {
         floatMarginStartDp = p.getInt("kb_fx", 8)
         floatMarginBottomDp = p.getInt("kb_fy", 8)
         floatWidthDp = p.getInt("kb_fw", 340)
+        kbStyle = p.getString("kb_style", "iphone") ?: "iphone"
+        kbColorIndex = p.getInt("kb_color", 0).coerceIn(0, kbColors.lastIndex)
     }
 
     override fun onCreateInputView(): View {
@@ -330,22 +349,23 @@ class SamKeyboardService : InputMethodService() {
         }
     }
 
+    /** Bàn phím tách đôi kiểu Gboard: nhân đôi G (giữa hàng 2) và V (giữa hàng 3) để gõ 2 tay. */
     private fun splitLayout(): List<List<Key>> {
         val g = splitGapWeight()
         val bottomLetters = listOf(
             Key(Kind.TO_SYMBOLS_1, "123", 1.25f),
             Key(Kind.LANG, "", 1.0f),
-            Key(Kind.SPACE, "", 2.25f),
+            Key(Kind.SPACE, "", 2.5f),
             gap(g),
-            Key(Kind.SPACE, "", 2.25f),
+            Key(Kind.SPACE, "", 2.5f),
             Key(Kind.ENTER, "return", 1.75f),
         )
         val bottomSymbols = listOf(
             Key(Kind.TO_LETTERS, "ABC", 1.25f),
             Key(Kind.LANG, "", 1.0f),
-            Key(Kind.SPACE, "", 2.25f),
+            Key(Kind.SPACE, "", 2.5f),
             gap(g),
-            Key(Kind.SPACE, "", 2.25f),
+            Key(Kind.SPACE, "", 2.5f),
             Key(Kind.ENTER, "return", 1.75f),
         )
         return when (layer) {
@@ -353,10 +373,10 @@ class SamKeyboardService : InputMethodService() {
                 "qwert".map { t(it.toString()) } + gap(g) + "yuiop".map { t(it.toString()) },
                 listOf(Key(Kind.SPACER, weight = 0.25f)) +
                     "asdfg".map { t(it.toString()) } + gap(g) +
-                    "hjkl".map { t(it.toString()) } +
+                    "ghjkl".map { t(it.toString()) } + // G lặp ở đầu nửa phải (bên trái H)
                     listOf(Key(Kind.SPACER, weight = 0.25f)),
                 listOf(Key(Kind.SHIFT, "⇧", 1.25f)) +
-                    "zxc".map { t(it.toString()) } + gap(g) +
+                    "zxcv".map { t(it.toString()) } + gap(g) + // V lặp ở cuối nửa trái (bên phải C)
                     "vbnm".map { t(it.toString()) } +
                     listOf(Key(Kind.DELETE, "⌫", 1.25f)),
                 bottomLetters,
@@ -389,39 +409,105 @@ class SamKeyboardService : InputMethodService() {
     private fun activeLayout(): List<List<Key>> =
         if (effectiveLayout() == KbLayout.SPLIT) splitLayout() else normalLayout()
 
-    private fun colors(): Colors {
-        val dark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+    // ---------------------------------------------------------------- màu sắc & giao diện
+
+    private fun currentColor(): KbColor = kbColors[kbColorIndex.coerceIn(kbColors.indices)]
+
+    private fun isDark(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
+
+    private fun colors(): Colors {
+        val dark = isDark()
+        val accent = currentColor().accent
+        return if (kbStyle == "samsung") samsungColors(dark, accent) else iphoneColors(dark, accent)
+    }
+
+    private fun iphoneColors(dark: Boolean, accent: Int): Colors {
+        val kc = currentColor()
+        val bgTint = if (dark) kc.darkTint else kc.lightTint
         return if (dark) {
             Colors(
-                background = Color.parseColor("#1C1C1E"),
+                background = if (kc.darkTint != 0) kc.darkTint else Color.parseColor("#1C1C1E"),
                 key = Color.parseColor("#636366"),
                 special = Color.parseColor("#48484A"),
                 pressedKey = Color.parseColor("#8E8E93"),
                 pressedSpecial = Color.parseColor("#636366"),
                 text = Color.WHITE,
                 specialText = Color.WHITE,
-                accent = Color.parseColor("#0A84FF"),
+                accent = accent,
                 popupBg = Color.parseColor("#636366"),
                 popupText = Color.WHITE,
                 panel = Color.parseColor("#2C2C2E"),
+                keyStroke = 0,
             )
         } else {
+            val bg = if (kc.lightTint != 0) blend(Color.parseColor("#D1D3D9"), bgTint, 0.25f) else Color.parseColor("#D1D3D9")
             Colors(
-                background = Color.parseColor("#D1D3D9"),
+                background = bg,
                 key = Color.WHITE,
                 special = Color.parseColor("#ADB3BC"),
                 pressedKey = Color.parseColor("#BFC3C9"),
                 pressedSpecial = Color.parseColor("#8E959D"),
                 text = Color.BLACK,
                 specialText = Color.BLACK,
-                accent = Color.parseColor("#007AFF"),
+                accent = accent,
                 popupBg = Color.WHITE,
                 popupText = Color.BLACK,
                 panel = Color.parseColor("#E5E6EA"),
+                keyStroke = 0,
             )
         }
     }
+
+    private fun samsungColors(dark: Boolean, accent: Int): Colors {
+        val kc = currentColor()
+        return if (dark) {
+            val bg = if (kc.darkTint != 0) blend(Color.parseColor("#010101"), kc.darkTint, 0.35f) else Color.parseColor("#010101")
+            Colors(
+                background = bg,
+                key = Color.parseColor("#3A3A3C"),
+                special = Color.parseColor("#2C2C2E"),
+                pressedKey = Color.parseColor("#555557"),
+                pressedSpecial = Color.parseColor("#444446"),
+                text = Color.parseColor("#F5F5F5"),
+                specialText = Color.parseColor("#F5F5F5"),
+                accent = accent,
+                popupBg = Color.parseColor("#4A4A4C"),
+                popupText = Color.WHITE,
+                panel = Color.parseColor("#1C1C1E"),
+                keyStroke = 0,
+            )
+        } else {
+            val bg = if (kc.lightTint != 0) blend(Color.parseColor("#F0F0F0"), kc.lightTint, 0.20f) else Color.parseColor("#F0F0F0")
+            Colors(
+                background = bg,
+                key = Color.WHITE,
+                special = Color.parseColor("#E1E3E6"),
+                pressedKey = Color.parseColor("#D5D7DA"),
+                pressedSpecial = Color.parseColor("#C8CBD0"),
+                text = Color.parseColor("#191919"),
+                specialText = Color.parseColor("#191919"),
+                accent = accent,
+                popupBg = Color.WHITE,
+                popupText = Color.parseColor("#191919"),
+                panel = Color.parseColor("#E6E8EB"),
+                keyStroke = Color.parseColor("#E0E0E0"),
+            )
+        }
+    }
+
+    private fun blend(base: Int, tint: Int, amount: Float): Int {
+        if (tint == 0) return base
+        val inv = 1f - amount
+        val r = (Color.red(base) * inv + Color.red(tint) * amount).roundToInt().coerceIn(0, 255)
+        val g = (Color.green(base) * inv + Color.green(tint) * amount).roundToInt().coerceIn(0, 255)
+        val b = (Color.blue(base) * inv + Color.blue(tint) * amount).roundToInt().coerceIn(0, 255)
+        return Color.rgb(r, g, b)
+    }
+
+    private fun keyCornerDp(): Int = if (kbStyle == "samsung") 8 else 5
+    private fun panelCornerDp(): Int = if (kbStyle == "samsung") 10 else 8
 
     // ---------------------------------------------------------------- dựng giao diện
 
@@ -497,11 +583,24 @@ class SamKeyboardService : InputMethodService() {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
             )
         }
-        row2.addView(labelChip("Chiều cao", 1.2f, c))
-        row2.addView(chip("−", 0.7f, c) { adjustHeight(-2) })
-        row2.addView(labelChip("${effectiveKeyHeight()}", 0.7f, c))
-        row2.addView(chip("+", 0.7f, c) { adjustHeight(2) })
+        row2.addView(labelChip("Chiều cao", 1.1f, c))
+        row2.addView(chip("−", 0.6f, c) { adjustHeight(-2) })
+        row2.addView(labelChip("${effectiveKeyHeight()}", 0.6f, c))
+        row2.addView(chip("+", 0.6f, c) { adjustHeight(2) })
         bar.addView(row2)
+
+        val row3 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
+            )
+        }
+        val styleLabel = if (kbStyle == "samsung") "Giao diện: Samsung" else "Giao diện: iPhone"
+        row3.addView(chip(styleLabel, 1.6f, c) { cycleStyle() })
+        val colorLabel = "Màu: ${currentColor().name}"
+        row3.addView(chip(colorLabel, 1.6f, c) { cycleColor() })
+        bar.addView(row3)
 
         if (eff == KbLayout.FLOATING) {
             val drag = TextView(this).apply {
@@ -533,6 +632,18 @@ class SamKeyboardService : InputMethodService() {
             bar.addView(nudge)
         }
         return bar
+    }
+
+    private fun cycleStyle() {
+        kbStyle = if (kbStyle == "iphone") "samsung" else "iphone"
+        prefs().edit().putString("kb_style", kbStyle).apply()
+        rebuild()
+    }
+
+    private fun cycleColor() {
+        kbColorIndex = (kbColorIndex + 1) % kbColors.size
+        prefs().edit().putInt("kb_color", kbColorIndex).apply()
+        rebuild()
     }
 
     private fun setWideLayout(mode: String) {
@@ -636,8 +747,9 @@ class SamKeyboardService : InputMethodService() {
             mode == KbLayout.FLOATING || isNarrowScreen() -> 2
             else -> 3
         }
+        val vMargin = if (kbStyle == "samsung") 3 else 4
         val params = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, key.weight)
-            .apply { setMargins(dp(hMargin), dp(4), dp(hMargin), dp(4)) }
+            .apply { setMargins(dp(hMargin), dp(vMargin), dp(hMargin), dp(vMargin)) }
 
         if (key.kind == Kind.SPACER) {
             return View(this).apply { layoutParams = params }
@@ -651,11 +763,12 @@ class SamKeyboardService : InputMethodService() {
             else -> c.key
         }
         val pressedColor = when {
-            isEnter -> Color.parseColor(if (isDark()) "#409CFF" else "#005EC4")
+            isEnter -> lightenPress(c.accent)
             isSpecial -> c.pressedSpecial
             else -> c.pressedKey
         }
         val textColor = if (isEnter) Color.WHITE else c.text
+        val radius = keyCornerDp()
 
         return TextView(this).apply {
             layoutParams = params
@@ -672,30 +785,39 @@ class SamKeyboardService : InputMethodService() {
                     else -> 17f * textScale
                 },
             )
-            background = rounded(baseColor, 5)
-            elevation = if (key.kind == Kind.TEXT || key.kind == Kind.SPACE) dp(1).toFloat() else 0f
+            background = rounded(baseColor, radius, c.keyStroke)
+            val elev = when {
+                kbStyle == "samsung" && (key.kind == Kind.TEXT || key.kind == Kind.SPACE) -> dp(1).toFloat()
+                kbStyle == "iphone" && (key.kind == Kind.TEXT || key.kind == Kind.SPACE) -> dp(1).toFloat()
+                else -> 0f
+            }
+            elevation = elev
             isClickable = true
             isHapticFeedbackEnabled = true
-            setOnTouchListener { v, ev -> handleTouch(v, ev, key, baseColor, pressedColor) }
+            setOnTouchListener { v, ev -> handleTouch(v, ev, key, baseColor, pressedColor, radius, c.keyStroke) }
         }
     }
 
-    private fun rounded(color: Int, radiusDp: Int = 5) = GradientDrawable().apply {
+    private fun lightenPress(accent: Int): Int {
+        val r = (Color.red(accent) + (255 - Color.red(accent)) * 0.25f).roundToInt().coerceIn(0, 255)
+        val g = (Color.green(accent) + (255 - Color.green(accent)) * 0.25f).roundToInt().coerceIn(0, 255)
+        val b = (Color.blue(accent) + (255 - Color.blue(accent)) * 0.25f).roundToInt().coerceIn(0, 255)
+        return Color.rgb(r, g, b)
+    }
+
+    private fun rounded(color: Int, radiusDp: Int = 5, stroke: Int = 0) = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = dp(radiusDp).toFloat()
         setColor(color)
+        if (stroke != 0) setStroke(dp(1).coerceAtLeast(1), stroke)
     }
 
-    private fun isDark(): Boolean =
-        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
-
     private fun handleTouch(
-        v: View, ev: MotionEvent, key: Key, baseColor: Int, pressedColor: Int,
+        v: View, ev: MotionEvent, key: Key, baseColor: Int, pressedColor: Int, radius: Int, stroke: Int,
     ): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                v.background = rounded(pressedColor, 5)
+                v.background = rounded(pressedColor, radius, 0)
                 performKeyHaptic(v)
                 if (key.kind == Kind.TEXT) showPopup(v, keyLabel(key))
                 if (key.kind == Kind.DELETE) {
@@ -705,11 +827,11 @@ class SamKeyboardService : InputMethodService() {
             }
             MotionEvent.ACTION_MOVE -> {
                 val inside = ev.x >= 0 && ev.x <= v.width && ev.y >= 0 && ev.y <= v.height
-                v.background = rounded(if (inside) pressedColor else baseColor, 5)
+                v.background = rounded(if (inside) pressedColor else baseColor, radius, if (inside) 0 else stroke)
                 if (!inside) hidePopup()
             }
             MotionEvent.ACTION_UP -> {
-                v.background = rounded(baseColor, 5)
+                v.background = rounded(baseColor, radius, stroke)
                 hidePopup()
                 if (key.kind == Kind.DELETE) {
                     handler.removeCallbacks(repeatDelete)
@@ -720,7 +842,7 @@ class SamKeyboardService : InputMethodService() {
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
-                v.background = rounded(baseColor, 5)
+                v.background = rounded(baseColor, radius, stroke)
                 hidePopup()
                 handler.removeCallbacks(repeatDelete)
             }
@@ -765,7 +887,7 @@ class SamKeyboardService : InputMethodService() {
         if (::popup.isInitialized) popup.visibility = View.GONE
     }
 
-    // ---------------------------------------------------------------- gõ tiếng Việt (Telex)
+    // ---------------------------------------------------------------- gõ tiếng Việt (Telex, QWERTY)
 
     private fun allowsTelex(info: EditorInfo?): Boolean {
         val type = info?.inputType ?: return false
@@ -1129,7 +1251,7 @@ class SamKeyboardService : InputMethodService() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
             setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = rounded(c.key, 8)
+            background = rounded(c.key, panelCornerDp())
             maxLines = 2
         }
         panel.addView(srcView)
@@ -1151,7 +1273,7 @@ class SamKeyboardService : InputMethodService() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(4), dp(10), dp(4))
-            background = rounded(c.special, 8)
+            background = rounded(c.special, panelCornerDp())
             maxLines = 2
         }
         panel.addView(resView)
@@ -1168,7 +1290,7 @@ class SamKeyboardService : InputMethodService() {
         gravity = Gravity.CENTER
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         setTextColor(if (accent) Color.WHITE else c.text)
-        background = rounded(if (accent) c.accent else c.special, 8)
+        background = rounded(if (accent) c.accent else c.special, panelCornerDp())
         isClickable = true
         setOnClickListener {
             performKeyHaptic(it)
