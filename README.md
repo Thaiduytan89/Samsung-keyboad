@@ -13,7 +13,7 @@ Bàn phím Android (giao diện kiểu iPhone/Samsung), viết bằng Kotlin. Kh
 - **Giữ phím xóa** để xóa liên tục.
 - **Tự viết hoa** đầu câu.
 - **Chạm đúp dấu cách** = chấm + cách.
-- **Tự sửa chính tả** (tuỳ chọn): khi bấm dấu cách, bàn phím có thể tự sửa từ gõ sai (dựa trên trình kiểm tra chính tả của hệ thống/thiết bị, nếu có).
+- **Tự sửa chính tả** (tuỳ chọn): khi bấm dấu cách, bàn phím tự sửa từ gõ sai (dựa trên từ điển sửa lỗi phổ biến và trình kiểm tra chính tả của hệ thống/thiết bị, nếu có), giữ kiểu viết hoa.
 - 2 trang ký hiệu (**123** và **#+=**).
 - Nút **return** tự đổi theo ô nhập (Go, Tìm, Gửi, Tiếp, Xong, ...).
 - Phím **VI / EN** để chuyển giữa tiếng Việt (Telex) và tiếng Anh, có nhớ lựa chọn.
@@ -26,10 +26,10 @@ Bàn phím Android (giao diện kiểu iPhone/Samsung), viết bằng Kotlin. Kh
 - **Màn hình ngoài (gập lại, màn hình nhỏ)**: tự động dùng **bàn phím bình thường** (gộp, full chiều ngang).
 - Bàn phím tự chuyển khi bạn gập/mở máy.
 
-### Tinh chỉnh (nút ⌨) — riêng biệt cho từng màn hình
+### Tinh chỉnh (nút ⌨) — riêng biệt cho từng màn hình và từng chiều
 
-- **Tất cả tinh chỉnh được lưu RIÊNG BIỆT** cho **màn hình trong** và **màn hình ngoài** (bố cục, chiều cao, lề mép, khoảng cách/kích thước phím, giao diện, màu, âm thanh, tự sửa lỗi, vị trí/kích thước chế độ nổi). Bạn có thể tinh chỉnh khác nhau cho mỗi màn hình.
-- Bấm nút **⌨** trên thanh công cụ để mở bảng tinh chỉnh:
+- **Tất cả tinh chỉnh được lưu RIÊNG BIỆT** cho **màn hình trong / màn hình ngoài** và cho **chiều dọc / chiều ngang** (bố cục, chiều cao, lề mép, khoảng cách/kích thước phím, giao diện, màu, âm thanh, tự sửa lỗi, vị trí/kích thước chế độ nổi). Bạn có thể tinh chỉnh khác nhau cho từng trường hợp.
+- Bấm nút **⌨** trên thanh công cụ để mở bảng tinh chỉnh (bảng hiển thị đang chỉnh màn hình/chiều nào):
   - **Trên màn hình trong**: chọn kiểu bố cục **Bình thường / Tách đôi / Nổi**.
     - **Tách đôi** (mặc định): hai nửa bàn phím tách sang hai bên (kiểu Gboard) + dãy số, dấu cách liền.
     - **Nổi**: bàn phím nổi có thể di chuyển (kéo thanh “⠿ Kéo để di chuyển bàn phím”, dùng nút ← → ↑ ↓ và **Rộng −/+**).
@@ -43,7 +43,7 @@ Bàn phím Android (giao diện kiểu iPhone/Samsung), viết bằng Kotlin. Kh
     - **Lề**: khoảng cách từ mép màn hình vào giữa.
     - **Ngang**: khoảng cách ngang giữa các phím.
     - **Dọc**: khoảng cách dọc giữa các phím.
-  - **Trên màn hình ngoài**: luôn dùng bàn phím bình thường, nhưng mọi tinh chỉnh trên (chiều cao, âm thanh, sửa lỗi, giao diện, màu, lề/khoảng cách, ...) được lưu **riêng** cho màn hình ngoài.
+  - **Trên màn hình ngoài**: luôn dùng bàn phím bình thường, nhưng mọi tinh chỉnh trên được lưu **riêng** cho màn hình ngoài (và riêng theo chiều dọc/ngang).
 
 ## Gõ tiếng Việt (Telex, bố cục QWERTY)
 
@@ -56,16 +56,16 @@ Bàn phím Android (giao diện kiểu iPhone/Samsung), viết bằng Kotlin. Kh
 
 ## Nhập liệu giọng nói
 
-- **🎤 (Mic)**: nhập liệu giọng nói bằng **tiếng Việt** và chèn trực tiếp vào ô nhập.
-- **VI→EN**: nói bằng **tiếng Việt**, tự dịch sang **tiếng Anh** và chèn thẳng vào khung chat/ô nhập.
-- Cần quyền **Microphone** (`RECORD_AUDIO`) và **mạng/Internet**. Nhận dạng giọng nói và dịch sử dụng dịch vụ của Google trên thiết bị/mạng (kết quả phụ thuộc thiết bị và kết nối).
+- **🎤 (Mic)**: nhập liệu giọng nói bằng **tiếng Việt**. Lời nói được nhận dạng và **hiện song song (trực tiếp) lên khung chat** trong khi bạn đang nói, và chốt văn bản khi kết thúc.
+- **VI→EN**: nói bằng **tiếng Việt**, tự dịch sang **tiếng Anh** và **hiện song song (trực tiếp) lên khung chat** ngay khi bạn nói; kết quả cuối cùng được chèn thẳng vào khung chat/ô nhập (nếu dịch lỗi sẽ chèn nguyên văn tiếng Việt và báo trạng thái).
+- Cần quyền **Microphone** (`RECORD_AUDIO`) và **mạng/Internet**. Nhận dạng giọng nói và dịch sử dụng dịch vụ của Google trên thiết bị/mạng (kết quả và độ trễ phụ thuộc thiết bị, kết nối).
 
 ## Dịch
 
 Bấm nút **Dịch** trên thanh phía trên bàn phím:
 
-- Khi đang soạn văn bản (chưa gửi), bấm **Dịch** sẽ tự lấy nội dung đang gõ/đang chọn, **dịch và thay thế trực tiếp vào khung chat/ô nhập** (không cần nút thay thế).
-- Có ô nhập văn bản cần dịch trong bảng dịch: bạn có thể gõ, sửa, xóa trực tiếp bằng bàn phím (khi gõ/sửa sẽ tự hiển thị bản dịch xem trước).
+- Khi mở bảng **Dịch**, bạn có thể **gõ/sửa/xóa trực tiếp trong khung nhập** và nội dung sẽ **hiện thẳng, song song lên khung chat/ô nhập** của ứng dụng; bản dịch xem trước hiển thị trong bảng.
+- Khi đang soạn văn bản (chưa gửi), bấm **Dịch** sẽ lấy nội dung đang gõ/đang chọn, **dịch và thay thế trực tiếp** vào khung chat/ô nhập.
 - Bấm **Sang: ...** để đổi ngôn ngữ đích giữa English, 繁體中文 (Hoa phồn thể), မြန်မာ (Myanmar) — sẽ dịch và thay thế trực tiếp.
 - Bấm **Dịch** (hoặc phím **Enter/return**) để dịch và thay thế trực tiếp vào khung chat/ô nhập.
 - Bấm **✕** để đóng bảng dịch.
@@ -86,7 +86,7 @@ Muốn có file APK để gửi cho máy khác: menu **Build > Build Bundle(s) /
 
 ## Cấu trúc code
 
-- `app/src/main/java/com/example/samkeyboard/SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, popup, xử lý gõ, bảng dịch, tách đôi/nổi/chiều cao, theme/màu, âm thanh, tinh chỉnh lề/khoảng cách riêng từng màn hình, dãy số, dấu cách liền, tự sửa chính tả, nhập liệu giọng nói, tối ưu gập/mở)
+- `app/src/main/java/com/example/samkeyboard/SamKeyboardService.kt`: toàn bộ bàn phím (bố cục, phím, popup, xử lý gõ, bảng dịch song song, tách đôi/nổi/chiều cao, theme/màu, âm thanh, tinh chỉnh lề/khoảng cách riêng từng màn hình & chiều, dãy số, dấu cách liền, tự sửa chính tả, nhập liệu giọng nói song song, tối ưu gập/mở)
 - `app/src/main/java/com/example/samkeyboard/TelexEngine.kt`: bộ gõ Telex (QWERTY)
 - `app/src/main/java/com/example/samkeyboard/SettingsActivity.kt`: màn hình hướng dẫn bật bàn phím
 - `app/src/main/res/xml/method.xml`: khai báo bàn phím với hệ thống

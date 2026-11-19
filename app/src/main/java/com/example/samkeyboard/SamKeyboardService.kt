@@ -28,6 +28,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.textservice.SentenceSuggestionsInfo
 import android.view.textservice.SpellCheckerSession
 import android.view.textservice.SuggestionsInfo
@@ -48,15 +49,14 @@ import kotlin.math.roundToInt
 
 /**
  * Bàn phím QWERTY tối ưu cho màn hình gập (Oppo Find N5 trong/ngoài):
- *  - Màn hình trong (rộng): bàn phím tách đôi kiểu Gboard + dãy số, dấu cách liền, gõ 2 tay.
- *  - Màn hình ngoài (gập lại): giao diện bàn phím bình thường.
- *  - Tinh chỉnh (bố cục, chiều cao, lề mép, khoảng cách phím, theme, màu, âm thanh, sửa lỗi)
- *    được lưu RIÊNG BIỆT cho từng màn hình (trong/ngoài).
- *  - Gõ tiếng Việt Telex (QWERTY) và English (phím VI/EN).
- *  - Tự sửa chính tả khi bấm dấu cách (tuỳ chọn).
- *  - Nhập liệu giọng nói tiếng Việt; nhập liệu giọng nói tiếng Việt và dịch sang tiếng Anh.
- *  - Dịch sang English, 繁體中文, မြန်မာ: bấm Dịch để dịch và thay thế trực tiếp vào ô chat.
- *  - Giao diện iPhone (mặc định) / Samsung, đổi màu bàn phím, popup mượt.
+ *  - Màn hình trong (rộng): tách đôi kiểu Gboard + dãy số, dấu cách liền, gõ 2 tay.
+ *  - Màn hình ngoài (gập lại): bàn phím bình thường.
+ *  - Tinh chỉnh (bố cục, chiều cao, lề, khoảng cách phím, theme, màu, âm, sửa lỗi, nổi)
+ *    lưu RIÊNG BIỆT cho từng màn hình (trong/ngoài) và từng chiều (dọc/ngang).
+ *  - Telex QWERTY (VI/EN), tự sửa chính tả khi bấm dấu cách.
+ *  - Dịch: gõ trong bảng dịch hiện song song lên khung chat; Dịch/Enter thay thế bằng bản dịch.
+ *  - Nhập liệu giọng nói VI (song song) và VI→EN (dịch & hiện song song lên khung chat).
+ *  - Giao diện iPhone/Samsung, đổi màu, popup mượt, âm thanh gõ.
  */
 class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellCheckerSessionListener {
 
@@ -98,19 +98,19 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     private var lastShiftTap = 0L
     private var lastSpaceTap = 0L
 
-    // ----- Tùy chỉnh (lưu riêng biệt cho từng màn hình: trong=rộng, ngoài=hẹp) -----
-    private var wideLayoutPref = "split" // "normal", "split", "floating" (màn hình trong)
+    // ----- Tùy chỉnh (lưu riêng: màn hình trong/ngoài × dọc/ngang) -----
+    private var wideLayoutPref = "split"
     private var keyHeightPref = 52
     private var floatMarginStartDp = 8
     private var floatMarginBottomDp = 8
     private var floatWidthDp = 340
     private var showKbSettings = false
     private var showDeepTune = false
-    private var kbStyle = "iphone" // "iphone", "samsung"
+    private var kbStyle = "iphone"
     private var kbColorIndex = 0
-    private var sideInsetDp = 0      // lề từ mép màn hình vào giữa
-    private var keyHGapDp = 3        // khoảng cách ngang giữa các phím
-    private var keyVGapDp = 4        // khoảng cách dọc giữa các phím
+    private var sideInsetDp = 0
+    private var keyHGapDp = 3
+    private var keyVGapDp = 4
     private var soundMode = 1
     private var autoCorrect = true
 
@@ -127,7 +127,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         KbColor("Xám", Color.parseColor("#8E8E93"), Color.parseColor("#E5E5EA"), Color.parseColor("#2C2C2E")),
     )
 
-    // Gõ tiếng Việt (Telex trên bố cục QWERTY)
+    // Telex (VI/EN)
     private val telex = TelexEngine()
     private var vietnamese = true
     private var telexAllowed = true
@@ -142,28 +142,47 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     private var translateStatus: String? = null
     private var targetIndex = 0
     private var translateJob = 0
-
-    // Bảng dịch
-    private var trCommitted = ""
-    private val trTelex = TelexEngine()
     private var trResult = ""
     private var trTranslating = false
     private var trPendingApply = false
-    private var trSnapUseSelection = false
-    private var trSnapSelected = ""
-    private var trSnapBefore = ""
-    private var trSnapAfter = ""
+    // khi mở: true = chỉ dịch/thay thế vùng chọn lúc đó (nếu còn), false = dịch/thay thế toàn bộ
+    private var trUseSelection = false
 
     // Tự sửa chính tả
     private var scSession: SpellCheckerSession? = null
+    private var scLocale: Locale? = null
     private var acWord: String? = null
     private var acWordLen: Int = 0
     private var acSeparator: String = " "
+
+    private val commonFixes = mapOf(
+        "teh" to "the", "adn" to "and", "ahve" to "have", "waht" to "what", "taht" to "that",
+        "hte" to "the", "recieve" to "receive", "seperate" to "separate", "definately" to "definitely",
+        "occured" to "occurred", "wierd" to "weird", "untill" to "until", "alot" to "a lot",
+        "becuase" to "because", "goverment" to "government", "enviroment" to "environment",
+        "freind" to "friend", "adress" to "address", "begining" to "beginning", "comming" to "coming",
+        "tommorow" to "tomorrow", "neccessary" to "necessary", "accomodate" to "accommodate",
+        "occurence" to "occurrence", "arguement" to "argument", "calender" to "calendar",
+        "collegue" to "colleague", "concious" to "conscious", "dissapear" to "disappear",
+        "existance" to "existence", "foriegn" to "foreign", "grammer" to "grammar",
+        "harrass" to "harass", "independant" to "independent", "liason" to "liaison",
+        "maintainance" to "maintenance", "noticable" to "noticeable", "posession" to "possession",
+        "publically" to "publicly", "realy" to "really", "succesful" to "successful",
+        "tounge" to "tongue", "truely" to "truly", "writting" to "writing",
+        "dont" to "don't", "cant" to "can't", "wont" to "won't", "im" to "I'm",
+        "ive" to "I've", "youre" to "you're", "theyre" to "they're", "didnt" to "didn't",
+        "doesnt" to "doesn't", "isnt" to "isn't", "wasnt" to "wasn't", "shouldnt" to "shouldn't",
+        "couldnt" to "couldn't", "wouldnt" to "wouldn't", "hasnt" to "hasn't", "havent" to "haven't",
+    )
 
     // Nhập liệu giọng nói
     private var speechRecognizer: SpeechRecognizer? = null
     private var voiceMode: Int = 0 // 0: không, 1: VI, 2: VI->EN
     private var voiceStatus: String? = null
+    private var voiceComposing: Boolean = false
+    private var voicePartialJob: Int = 0
+    private var lastVoicePartialVi: String = ""
+    private val voicePartialRunnable = Runnable { runVoicePartialTranslate() }
 
     private val repeatDelete = object : Runnable {
         override fun run() {
@@ -192,9 +211,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             typeface = Typeface.DEFAULT
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 34f)
         }
-        root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
+        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         container.addView(root)
         container.addView(popup, FrameLayout.LayoutParams(dp(56), dp(64)))
         rebuild()
@@ -223,21 +240,15 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        loadProfileSettings()
+        loadProfileSettings() // đổi màn hình trong/ngoài hoặc dọc/ngang -> nạp hồ sơ riêng
         rebuild()
     }
 
     override fun onUpdateSelection(
-        oldSelStart: Int,
-        oldSelEnd: Int,
-        newSelStart: Int,
-        newSelEnd: Int,
-        candidatesStart: Int,
-        candidatesEnd: Int,
+        oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int,
+        candidatesStart: Int, candidatesEnd: Int,
     ) {
-        super.onUpdateSelection(
-            oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd,
-        )
+        super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
         if (!telex.isEmpty &&
             (candidatesStart == -1 || newSelStart != candidatesEnd || newSelEnd != candidatesEnd)
         ) {
@@ -256,20 +267,27 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
 
     private fun prefs() = getSharedPreferences("samkeyboard", Context.MODE_PRIVATE)
 
-    // ---------------------------------------------------------------- hồ sơ theo màn hình
+    // ---------------------------------------------------------------- hồ sơ theo màn hình & chiều
 
     private fun screenWidthDp(): Int = resources.configuration.screenWidthDp
     private fun screenHeightDp(): Int = resources.configuration.screenHeightDp
     private fun isWideScreen(): Boolean = screenWidthDp() >= 600
-    private fun profile(): String = if (isWideScreen()) "wide" else "narrow"
+    private fun orientationTag(): String =
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "land" else "port"
+    private fun baseProfile(): String = if (isWideScreen()) "wide" else "narrow"
+    private fun profile(): String = baseProfile() + "_" + orientationTag() // vd: wide_land, narrow_port
     private fun pkey(name: String): String = profile() + "_" + name
 
     private fun loadProfileSettings() {
         val p = prefs()
         val pf = profile()
-        fun ig(name: String, old: String, def: Int): Int = p.getInt("${pf}_$name", p.getInt(old, def))
-        fun sg(name: String, old: String, def: String): String = p.getString("${pf}_$name", p.getString(old, def)) ?: def
-        fun bg(name: String, old: String, def: Boolean): Boolean = p.getBoolean("${pf}_$name", p.getBoolean(old, def))
+        val base = baseProfile()
+        fun ig(name: String, old: String, def: Int): Int =
+            p.getInt("${pf}_$name", p.getInt("${base}_$name", p.getInt(old, def)))
+        fun sg(name: String, old: String, def: String): String =
+            p.getString("${pf}_$name", p.getString("${base}_$name", p.getString(old, def))) ?: def
+        fun bg(name: String, old: String, def: Boolean): Boolean =
+            p.getBoolean("${pf}_$name", p.getBoolean("${base}_$name", p.getBoolean(old, def)))
 
         wideLayoutPref = sg("layout", "kb_wide_layout", "split")
         keyHeightPref = ig("height", "kb_height", 52)
@@ -285,19 +303,11 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         autoCorrect = bg("autocorrect", "kb_autocorrect", true)
     }
 
-    private fun saveInt(name: String, value: Int) {
-        prefs().edit().putInt(pkey(name), value).apply()
-    }
+    private fun saveInt(name: String, value: Int) { prefs().edit().putInt(pkey(name), value).apply() }
+    private fun saveString(name: String, value: String) { prefs().edit().putString(pkey(name), value).apply() }
+    private fun saveBool(name: String, value: Boolean) { prefs().edit().putBoolean(pkey(name), value).apply() }
 
-    private fun saveString(name: String, value: String) {
-        prefs().edit().putString(pkey(name), value).apply()
-    }
-
-    private fun saveBool(name: String, value: Boolean) {
-        prefs().edit().putBoolean(pkey(name), value).apply()
-    }
-
-    // ---------------------------------------------------------------- tối ưu màn hình (gập/mở)
+    // ---------------------------------------------------------------- tối ưu màn hình
 
     private fun effectiveLayout(): KbLayout {
         if (!isWideScreen()) return KbLayout.NORMAL
@@ -337,9 +347,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     private fun applyRootLayout() {
         if (!::root.isInitialized || !::container.isInitialized) return
         val lp = (root.layoutParams as? FrameLayout.LayoutParams)
-            ?: FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
+            ?: FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         val mode = effectiveLayout()
         val sw = screenWidthDp()
         if (mode == KbLayout.FLOATING) {
@@ -368,14 +376,12 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         root.layoutParams = lp
     }
 
-    private fun pxToDp(px: Int): Int =
-        (px / resources.displayMetrics.density).roundToInt()
+    private fun pxToDp(px: Int): Int = (px / resources.displayMetrics.density).roundToInt()
 
     // ---------------------------------------------------------------- bố cục phím
 
     private fun t(s: String) = Key(Kind.TEXT, s)
     private fun gap(w: Float = 3.0f) = Key(Kind.SPACER, weight = w)
-
     private fun splitGapWeight(): Float = if (screenWidthDp() >= 720) 3.5f else 2.8f
 
     private fun normalLayout(): List<List<Key>> {
@@ -394,7 +400,6 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         return when (layer) {
             Layer.LETTERS -> {
                 val rows = mutableListOf<List<Key>>()
-                // Dãy số trên màn hình trong (rộng)
                 if (isWideScreen()) {
                     rows.add(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0").map { t(it) })
                 }
@@ -431,10 +436,10 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         }
     }
 
-    /** Bàn phím tách đôi kiểu Gboard (màn hình trong): dãy số, G/V lặp, dấu cách liền 1 phím. */
+    /** Tách đôi kiểu Gboard (màn hình trong): dãy số, G/V lặp, dấu cách liền 1 phím. */
     private fun splitLayout(): List<List<Key>> {
         val g = splitGapWeight()
-        val spaceW = 5.0f + g // dấu cách nối dài chung 1 phím trên giao diện màn hình trong
+        val spaceW = 5.0f + g // dấu cách nối dài chung 1 phím
         val bottomLetters = listOf(
             Key(Kind.TO_SYMBOLS_1, "123", 1.25f),
             Key(Kind.LANG, "", 1.0f),
@@ -454,10 +459,10 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
                 "qwert".map { t(it.toString()) } + gap(g) + "yuiop".map { t(it.toString()) },
                 listOf(Key(Kind.SPACER, weight = 0.25f)) +
                     "asdfg".map { t(it.toString()) } + gap(g) +
-                    "ghjkl".map { t(it.toString()) } + // G lặp ở đầu nửa phải (bên trái H)
+                    "ghjkl".map { t(it.toString()) } + // G lặp bên trái H
                     listOf(Key(Kind.SPACER, weight = 0.25f)),
                 listOf(Key(Kind.SHIFT, "⇧", 1.25f)) +
-                    "zxcv".map { t(it.toString()) } + gap(g) + // V lặp ở cuối nửa trái (bên phải C)
+                    "zxcv".map { t(it.toString()) } + gap(g) + // V lặp bên phải C
                     "vbnm".map { t(it.toString()) } +
                     listOf(Key(Kind.DELETE, "⌫", 1.25f)),
                 bottomLetters,
@@ -495,8 +500,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     private fun currentColor(): KbColor = kbColors[kbColorIndex.coerceIn(kbColors.indices)]
 
     private fun isDark(): Boolean =
-        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
     private fun colors(): Colors {
         val dark = isDark()
@@ -513,30 +517,19 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
                 special = Color.parseColor("#48484A"),
                 pressedKey = Color.parseColor("#8E8E93"),
                 pressedSpecial = Color.parseColor("#636366"),
-                text = Color.WHITE,
-                specialText = Color.WHITE,
-                accent = accent,
-                popupBg = Color.parseColor("#636366"),
-                popupText = Color.WHITE,
-                panel = Color.parseColor("#2C2C2E"),
-                keyStroke = 0,
+                text = Color.WHITE, specialText = Color.WHITE, accent = accent,
+                popupBg = Color.parseColor("#636366"), popupText = Color.WHITE,
+                panel = Color.parseColor("#2C2C2E"), keyStroke = 0,
             )
         } else {
             val baseBg = Color.parseColor("#D1D3D9")
             val bg = if (kc.lightTint != 0) blend(baseBg, kc.lightTint, 0.25f) else baseBg
             Colors(
-                background = bg,
-                key = Color.WHITE,
-                special = Color.parseColor("#ADB3BC"),
-                pressedKey = Color.parseColor("#BFC3C9"),
-                pressedSpecial = Color.parseColor("#8E959D"),
-                text = Color.BLACK,
-                specialText = Color.BLACK,
-                accent = accent,
-                popupBg = Color.WHITE,
-                popupText = Color.BLACK,
-                panel = Color.parseColor("#E5E6EA"),
-                keyStroke = 0,
+                background = bg, key = Color.WHITE, special = Color.parseColor("#ADB3BC"),
+                pressedKey = Color.parseColor("#BFC3C9"), pressedSpecial = Color.parseColor("#8E959D"),
+                text = Color.BLACK, specialText = Color.BLACK, accent = accent,
+                popupBg = Color.WHITE, popupText = Color.BLACK,
+                panel = Color.parseColor("#E5E6EA"), keyStroke = 0,
             )
         }
     }
@@ -547,35 +540,21 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             val baseBg = Color.parseColor("#010101")
             val bg = if (kc.darkTint != 0) blend(baseBg, kc.darkTint, 0.35f) else baseBg
             Colors(
-                background = bg,
-                key = Color.parseColor("#3A3A3C"),
-                special = Color.parseColor("#2C2C2E"),
-                pressedKey = Color.parseColor("#555557"),
-                pressedSpecial = Color.parseColor("#444446"),
-                text = Color.parseColor("#F5F5F5"),
-                specialText = Color.parseColor("#F5F5F5"),
-                accent = accent,
-                popupBg = Color.parseColor("#4A4A4C"),
-                popupText = Color.WHITE,
-                panel = Color.parseColor("#1C1C1E"),
-                keyStroke = 0,
+                background = bg, key = Color.parseColor("#3A3A3C"), special = Color.parseColor("#2C2C2E"),
+                pressedKey = Color.parseColor("#555557"), pressedSpecial = Color.parseColor("#444446"),
+                text = Color.parseColor("#F5F5F5"), specialText = Color.parseColor("#F5F5F5"), accent = accent,
+                popupBg = Color.parseColor("#4A4A4C"), popupText = Color.WHITE,
+                panel = Color.parseColor("#1C1C1E"), keyStroke = 0,
             )
         } else {
             val baseBg = Color.parseColor("#F0F0F0")
             val bg = if (kc.lightTint != 0) blend(baseBg, kc.lightTint, 0.20f) else baseBg
             Colors(
-                background = bg,
-                key = Color.WHITE,
-                special = Color.parseColor("#E1E3E6"),
-                pressedKey = Color.parseColor("#D5D7DA"),
-                pressedSpecial = Color.parseColor("#C8CBD0"),
-                text = Color.parseColor("#191919"),
-                specialText = Color.parseColor("#191919"),
-                accent = accent,
-                popupBg = Color.WHITE,
-                popupText = Color.parseColor("#191919"),
-                panel = Color.parseColor("#E6E8EB"),
-                keyStroke = Color.parseColor("#E0E0E0"),
+                background = bg, key = Color.WHITE, special = Color.parseColor("#E1E3E6"),
+                pressedKey = Color.parseColor("#D5D7DA"), pressedSpecial = Color.parseColor("#C8CBD0"),
+                text = Color.parseColor("#191919"), specialText = Color.parseColor("#191919"), accent = accent,
+                popupBg = Color.WHITE, popupText = Color.parseColor("#191919"),
+                panel = Color.parseColor("#E6E8EB"), keyStroke = Color.parseColor("#E0E0E0"),
             )
         }
     }
@@ -626,105 +605,86 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(c.panel)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
         val wide = isWideScreen()
         val eff = effectiveLayout()
+        val orientLabel = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "Ngang" else "Dọc"
+        val screenLabel = if (wide) "Màn hình trong" else "Màn hình ngoài"
 
         val row1 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
         }
         if (wide) {
-            row1.addView(chip("Bình thường", 1.2f, c, accent = eff == KbLayout.NORMAL) { setWideLayout("normal") })
-            row1.addView(chip("Tách đôi", 1.1f, c, accent = eff == KbLayout.SPLIT) { setWideLayout("split") })
-            row1.addView(chip("Nổi", 0.8f, c, accent = eff == KbLayout.FLOATING) { setWideLayout("floating") })
+            row1.addView(chip("Bình thường", 1.1f, c, accent = eff == KbLayout.NORMAL) { setWideLayout("normal") })
+            row1.addView(chip("Tách đôi", 1.0f, c, accent = eff == KbLayout.SPLIT) { setWideLayout("split") })
+            row1.addView(chip("Nổi", 0.7f, c, accent = eff == KbLayout.FLOATING) { setWideLayout("floating") })
         } else {
-            row1.addView(labelChip("Màn hình ngoài (riêng)", 3.1f, c))
+            row1.addView(labelChip("$screenLabel - $orientLabel (riêng)", 2.8f, c))
         }
-        row1.addView(chip("Đóng", 0.8f, c) {
-            showKbSettings = false
-            rebuild()
-        })
+        row1.addView(chip("Đóng", 0.8f, c) { showKbSettings = false; rebuild() })
         bar.addView(row1)
 
         val row2 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36))
         }
-        row2.addView(labelChip("Cao", 0.6f, c))
-        row2.addView(chip("−", 0.45f, c) { adjustHeight(-2) })
-        row2.addView(labelChip("${effectiveKeyHeight()}", 0.45f, c))
-        row2.addView(chip("+", 0.45f, c) { adjustHeight(2) })
-        row2.addView(chip("Âm: ${soundModes[soundMode]}", 1.4f, c) { cycleSound() })
-        row2.addView(chip(if (autoCorrect) "Sửa lỗi: Bật" else "Sửa lỗi: Tắt", 1.3f, c, accent = autoCorrect) { toggleAutoCorrect() })
+        row2.addView(labelChip("Cao", 0.5f, c))
+        row2.addView(chip("−", 0.4f, c) { adjustHeight(-2) })
+        row2.addView(labelChip("${effectiveKeyHeight()}", 0.4f, c))
+        row2.addView(chip("+", 0.4f, c) { adjustHeight(2) })
+        row2.addView(chip("Âm: ${soundModes[soundMode]}", 1.3f, c) { cycleSound() })
+        row2.addView(chip(if (autoCorrect) "Sửa lỗi: Bật" else "Sửa lỗi: Tắt", 1.2f, c, accent = autoCorrect) { toggleAutoCorrect() })
         bar.addView(row2)
 
         val row3 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36))
         }
         val styleLabel = if (kbStyle == "samsung") "Giao diện: Samsung" else "Giao diện: iPhone"
-        row3.addView(chip(styleLabel, 1.4f, c) { cycleStyle() })
-        row3.addView(chip("Màu: ${currentColor().name}", 1.2f, c) { cycleColor() })
+        row3.addView(chip(styleLabel, 1.3f, c) { cycleStyle() })
+        row3.addView(chip("Màu: ${currentColor().name}", 1.1f, c) { cycleColor() })
         val tuneLabel = if (showDeepTune) "Tinh chỉnh ▲" else "Tinh chỉnh ▼"
-        row3.addView(chip(tuneLabel, 1.0f, c, accent = showDeepTune) {
-            showDeepTune = !showDeepTune
-            rebuild()
-        })
+        row3.addView(chip(tuneLabel, 0.9f, c, accent = showDeepTune) { showDeepTune = !showDeepTune; rebuild() })
         bar.addView(row3)
 
         if (showDeepTune) {
             val row4 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
-                )
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36))
             }
-            row4.addView(labelChip("Lề", 0.5f, c))
-            row4.addView(chip("−", 0.45f, c) { adjustSideInset(-2) })
-            row4.addView(labelChip("$sideInsetDp", 0.4f, c))
-            row4.addView(chip("+", 0.45f, c) { adjustSideInset(2) })
-            row4.addView(labelChip("Ngang", 0.6f, c))
-            row4.addView(chip("−", 0.45f, c) { adjustHGap(-1) })
-            row4.addView(labelChip("$keyHGapDp", 0.35f, c))
-            row4.addView(chip("+", 0.45f, c) { adjustHGap(1) })
-            row4.addView(labelChip("Dọc", 0.5f, c))
-            row4.addView(chip("−", 0.45f, c) { adjustVGap(-1) })
-            row4.addView(labelChip("$keyVGapDp", 0.35f, c))
-            row4.addView(chip("+", 0.45f, c) { adjustVGap(1) })
+            row4.addView(labelChip("Lề", 0.45f, c))
+            row4.addView(chip("−", 0.4f, c) { adjustSideInset(-2) })
+            row4.addView(labelChip("$sideInsetDp", 0.35f, c))
+            row4.addView(chip("+", 0.4f, c) { adjustSideInset(2) })
+            row4.addView(labelChip("Ngang", 0.55f, c))
+            row4.addView(chip("−", 0.4f, c) { adjustHGap(-1) })
+            row4.addView(labelChip("$keyHGapDp", 0.3f, c))
+            row4.addView(chip("+", 0.4f, c) { adjustHGap(1) })
+            row4.addView(labelChip("Dọc", 0.45f, c))
+            row4.addView(chip("−", 0.4f, c) { adjustVGap(-1) })
+            row4.addView(labelChip("$keyVGapDp", 0.3f, c))
+            row4.addView(chip("+", 0.4f, c) { adjustVGap(1) })
             bar.addView(row4)
 
             val row5 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(30),
-                )
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30))
             }
-            val screenLabel = if (wide) "Đang chỉnh: Màn hình trong (riêng)" else "Đang chỉnh: Màn hình ngoài (riêng)"
-            row5.addView(labelChip("$screenLabel — Lề: mép→giữa, Ngang/Dọc: khoảng cách phím", 4f, c))
+            row5.addView(labelChip("Đang chỉnh: $screenLabel - $orientLabel (riêng). Lề: mép→giữa, Ngang/Dọc: khoảng cách phím", 4f, c))
             bar.addView(row5)
         }
 
         if (eff == KbLayout.FLOATING) {
             val drag = TextView(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(34),
-                )
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
                 text = "⠿  Kéo để di chuyển bàn phím"
                 gravity = Gravity.CENTER
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -737,9 +697,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             val nudge = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(34),
-                )
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
             }
             nudge.addView(chip("←", 1f, c) { nudgeFloat(-12, 0) })
             nudge.addView(chip("→", 1f, c) { nudgeFloat(12, 0) })
@@ -752,35 +710,11 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         return bar
     }
 
-    private fun cycleStyle() {
-        kbStyle = if (kbStyle == "iphone") "samsung" else "iphone"
-        saveString("style", kbStyle)
-        rebuild()
-    }
-
-    private fun cycleColor() {
-        kbColorIndex = (kbColorIndex + 1) % kbColors.size
-        saveInt("color", kbColorIndex)
-        rebuild()
-    }
-
-    private fun cycleSound() {
-        soundMode = (soundMode + 1) % soundModes.size
-        saveInt("sound", soundMode)
-        rebuild()
-    }
-
-    private fun toggleAutoCorrect() {
-        autoCorrect = !autoCorrect
-        saveBool("autocorrect", autoCorrect)
-        rebuild()
-    }
-
-    private fun setWideLayout(mode: String) {
-        wideLayoutPref = mode
-        saveString("layout", mode)
-        rebuild()
-    }
+    private fun cycleStyle() { kbStyle = if (kbStyle == "iphone") "samsung" else "iphone"; saveString("style", kbStyle); rebuild() }
+    private fun cycleColor() { kbColorIndex = (kbColorIndex + 1) % kbColors.size; saveInt("color", kbColorIndex); rebuild() }
+    private fun cycleSound() { soundMode = (soundMode + 1) % soundModes.size; saveInt("sound", soundMode); rebuild() }
+    private fun toggleAutoCorrect() { autoCorrect = !autoCorrect; saveBool("autocorrect", autoCorrect); rebuild() }
+    private fun setWideLayout(mode: String) { wideLayoutPref = mode; saveString("layout", mode); rebuild() }
 
     private inner class DragTouchListener : View.OnTouchListener {
         private var startRawX = 0f
@@ -790,10 +724,8 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         override fun onTouch(v: View, ev: MotionEvent): Boolean {
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    startRawX = ev.rawX
-                    startRawY = ev.rawY
-                    startMarginStart = floatMarginStartDp
-                    startMarginBottom = floatMarginBottomDp
+                    startRawX = ev.rawX; startRawY = ev.rawY
+                    startMarginStart = floatMarginStartDp; startMarginBottom = floatMarginBottomDp
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -801,9 +733,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
                     val dyDp = pxToDp((ev.rawY - startRawY).roundToInt())
                     floatMarginStartDp = startMarginStart + dxDp
                     floatMarginBottomDp = startMarginBottom - dyDp
-                    saveFloatState()
-                    applyRootLayout()
-                    return true
+                    saveFloatState(); applyRootLayout(); return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return true
             }
@@ -811,57 +741,19 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         }
     }
 
-    private fun nudgeFloat(dx: Int, dy: Int) {
-        floatMarginStartDp += dx
-        floatMarginBottomDp += dy
-        saveFloatState()
-        applyRootLayout()
-    }
-
-    private fun adjustFloatWidth(delta: Int) {
-        floatWidthDp += delta
-        saveInt("fw", floatWidthDp)
-        applyRootLayout()
-    }
-
+    private fun nudgeFloat(dx: Int, dy: Int) { floatMarginStartDp += dx; floatMarginBottomDp += dy; saveFloatState(); applyRootLayout() }
+    private fun adjustFloatWidth(delta: Int) { floatWidthDp += delta; saveInt("fw", floatWidthDp); applyRootLayout() }
     private fun saveFloatState() {
-        val p = prefs().edit()
-        p.putInt(pkey("fx"), floatMarginStartDp)
-        p.putInt(pkey("fy"), floatMarginBottomDp)
-        p.apply()
+        prefs().edit().putInt(pkey("fx"), floatMarginStartDp).putInt(pkey("fy"), floatMarginBottomDp).apply()
     }
-
-    private fun adjustHeight(delta: Int) {
-        keyHeightPref = (keyHeightPref + delta).coerceIn(36, 78)
-        saveInt("height", keyHeightPref)
-        rebuild()
-    }
-
-    private fun adjustSideInset(delta: Int) {
-        sideInsetDp = (sideInsetDp + delta).coerceIn(0, 60)
-        saveInt("inset", sideInsetDp)
-        rebuild()
-    }
-
-    private fun adjustHGap(delta: Int) {
-        keyHGapDp = (keyHGapDp + delta).coerceIn(0, 10)
-        saveInt("hgap", keyHGapDp)
-        rebuild()
-    }
-
-    private fun adjustVGap(delta: Int) {
-        keyVGapDp = (keyVGapDp + delta).coerceIn(0, 10)
-        saveInt("vgap", keyVGapDp)
-        rebuild()
-    }
-
-    private fun adjustAlpha(color: Int, alpha: Int): Int =
-        Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+    private fun adjustHeight(delta: Int) { keyHeightPref = (keyHeightPref + delta).coerceIn(36, 78); saveInt("height", keyHeightPref); rebuild() }
+    private fun adjustSideInset(delta: Int) { sideInsetDp = (sideInsetDp + delta).coerceIn(0, 60); saveInt("inset", sideInsetDp); rebuild() }
+    private fun adjustHGap(delta: Int) { keyHGapDp = (keyHGapDp + delta).coerceIn(0, 10); saveInt("hgap", keyHGapDp); rebuild() }
+    private fun adjustVGap(delta: Int) { keyVGapDp = (keyVGapDp + delta).coerceIn(0, 10); saveInt("vgap", keyVGapDp); rebuild() }
+    private fun adjustAlpha(color: Int, alpha: Int): Int = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
 
     private fun displayLabel(key: Key): String =
-        if (key.kind == Kind.TEXT && layer == Layer.LETTERS && shift != Shift.OFF) {
-            key.label.uppercase()
-        } else key.label
+        if (key.kind == Kind.TEXT && layer == Layer.LETTERS && shift != Shift.OFF) key.label.uppercase() else key.label
 
     private fun enterLabel(): String {
         val info = currentInputEditorInfo ?: return "return"
@@ -893,23 +785,12 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val vMargin = keyVGapDp.coerceAtLeast(0)
         val params = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, key.weight)
             .apply { setMargins(dp(hMargin), dp(vMargin), dp(hMargin), dp(vMargin)) }
-
-        if (key.kind == Kind.SPACER) {
-            return View(this).apply { layoutParams = params }
-        }
+        if (key.kind == Kind.SPACER) return View(this).apply { layoutParams = params }
 
         val isEnter = key.kind == Kind.ENTER
         val isSpecial = key.kind != Kind.TEXT && key.kind != Kind.SPACE
-        val baseColor = when {
-            isEnter -> c.accent
-            isSpecial -> c.special
-            else -> c.key
-        }
-        val pressedColor = when {
-            isEnter -> lightenPress(c.accent)
-            isSpecial -> c.pressedSpecial
-            else -> c.pressedKey
-        }
+        val baseColor = when { isEnter -> c.accent; isSpecial -> c.special; else -> c.key }
+        val pressedColor = when { isEnter -> lightenPress(c.accent); isSpecial -> c.pressedSpecial; else -> c.pressedKey }
         val textColor = if (isEnter) Color.WHITE else c.text
         val radius = keyCornerDp()
 
@@ -919,18 +800,11 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             gravity = Gravity.CENTER
             setTextColor(textColor)
             typeface = if (key.kind == Kind.TEXT) Typeface.DEFAULT else Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-            setTextSize(
-                TypedValue.COMPLEX_UNIT_SP,
-                when (key.kind) {
-                    Kind.TEXT -> 22f * textScale
-                    Kind.SPACE -> 15f * textScale
-                    Kind.ENTER -> 15f * textScale
-                    else -> 17f * textScale
-                },
-            )
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, when (key.kind) {
+                Kind.TEXT -> 22f * textScale; Kind.SPACE -> 15f * textScale; Kind.ENTER -> 15f * textScale; else -> 17f * textScale
+            })
             background = rounded(baseColor, radius, c.keyStroke)
-            val elev = if (key.kind == Kind.TEXT || key.kind == Kind.SPACE) dp(1).toFloat() else 0f
-            elevation = elev
+            elevation = if (key.kind == Kind.TEXT || key.kind == Kind.SPACE) dp(1).toFloat() else 0f
             isClickable = true
             isHapticFeedbackEnabled = true
             setOnTouchListener { v, ev -> handleTouch(v, ev, key, baseColor, pressedColor, radius, c.keyStroke) }
@@ -960,10 +834,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
                 performKeyHaptic(v)
                 playKeySound(key)
                 if (key.kind == Kind.TEXT) showPopup(v, keyLabel(key))
-                if (key.kind == Kind.DELETE) {
-                    deleteOnce()
-                    handler.postDelayed(repeatDelete, 400)
-                }
+                if (key.kind == Kind.DELETE) { deleteOnce(); handler.postDelayed(repeatDelete, 400) }
             }
             MotionEvent.ACTION_MOVE -> {
                 val inside = ev.x >= 0 && ev.x <= v.width && ev.y >= 0 && ev.y <= v.height
@@ -973,10 +844,8 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             MotionEvent.ACTION_UP -> {
                 v.background = rounded(baseColor, radius, stroke)
                 hidePopup()
-                if (key.kind == Kind.DELETE) {
-                    handler.removeCallbacks(repeatDelete)
-                    refreshShift()
-                } else {
+                if (key.kind == Kind.DELETE) { handler.removeCallbacks(repeatDelete); refreshShift() }
+                else {
                     val inside = ev.x >= 0 && ev.x <= v.width && ev.y >= 0 && ev.y <= v.height
                     if (inside) onKey(key)
                 }
@@ -994,12 +863,9 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val ok = if (Build.VERSION.SDK_INT >= 27) {
             v.performHapticFeedback(
                 HapticFeedbackConstants.KEYBOARD_PRESS,
-                HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING or
-                    HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING,
+                HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING or HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING,
             ) || v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_PRESS)
-        } else {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-        }
+        } else v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
         if (!ok) v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
     }
 
@@ -1025,62 +891,37 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         if (!::popup.isInitialized || !::container.isInitialized) return
         popup.animate().cancel()
         popup.text = text
-        popup.alpha = 0f
-        popup.scaleX = 0.6f
-        popup.scaleY = 0.6f
-        popup.translationY = dp(6).toFloat()
+        popup.alpha = 0f; popup.scaleX = 0.6f; popup.scaleY = 0.6f; popup.translationY = dp(6).toFloat()
         popup.visibility = View.VISIBLE
         popup.bringToFront()
 
         val lp = popup.layoutParams as FrameLayout.LayoutParams
         lp.width = dp(if (text.length <= 1) 58 else 74)
         lp.height = dp(66)
-        val locA = IntArray(2)
-        val locC = IntArray(2)
-        anchor.getLocationInWindow(locA)
-        container.getLocationInWindow(locC)
+        val locA = IntArray(2); val locC = IntArray(2)
+        anchor.getLocationInWindow(locA); container.getLocationInWindow(locC)
         val ax = locA[0] - locC[0] + anchor.width / 2 - lp.width / 2
         val ay = locA[1] - locC[1] - lp.height - dp(4)
         val cw = if (container.width > 0) container.width else resources.displayMetrics.widthPixels
         lp.leftMargin = ax.coerceIn(dp(2), (cw - lp.width - dp(2)).coerceAtLeast(dp(2)))
         lp.topMargin = ay.coerceAtLeast(dp(2))
         popup.layoutParams = lp
-
-        popup.pivotX = lp.width / 2f
-        popup.pivotY = lp.height.toFloat()
-        popup.animate()
-            .alpha(1f)
-            .scaleX(1f)
-            .scaleY(1f)
-            .translationY(0f)
-            .setDuration(120)
-            .setInterpolator(DecelerateInterpolator())
-            .start()
+        popup.pivotX = lp.width / 2f; popup.pivotY = lp.height.toFloat()
+        popup.animate().alpha(1f).scaleX(1f).scaleY(1f).translationY(0f)
+            .setDuration(120).setInterpolator(DecelerateInterpolator()).start()
     }
 
     private fun hidePopup() {
         if (!::popup.isInitialized) return
-        if (popup.visibility != View.VISIBLE) {
-            popup.animate().cancel()
-            return
-        }
+        if (popup.visibility != View.VISIBLE) { popup.animate().cancel(); return }
         popup.animate().cancel()
-        popup.animate()
-            .alpha(0f)
-            .scaleX(0.88f)
-            .scaleY(0.88f)
-            .setDuration(90)
-            .setInterpolator(DecelerateInterpolator())
-            .withEndAction {
-                popup.visibility = View.GONE
-                popup.alpha = 1f
-                popup.scaleX = 1f
-                popup.scaleY = 1f
-            }
+        popup.animate().alpha(0f).scaleX(0.88f).scaleY(0.88f)
+            .setDuration(90).setInterpolator(DecelerateInterpolator())
+            .withEndAction { popup.visibility = View.GONE; popup.alpha = 1f; popup.scaleX = 1f; popup.scaleY = 1f }
             .start()
     }
 
-    // ---------------------------------------------------------------- gõ tiếng Việt (Telex, QWERTY)
+    // ---------------------------------------------------------------- Telex / nhập liệu
 
     private fun allowsTelex(info: EditorInfo?): Boolean {
         val type = info?.inputType ?: return false
@@ -1095,17 +936,11 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     }
 
     private fun telexOn(): Boolean = vietnamese && telexAllowed && layer == Layer.LETTERS
-    private fun trTelexOn(): Boolean = vietnamese && layer == Layer.LETTERS
-
     private fun isAsciiLetter(c: Char) = c in 'a'..'z' || c in 'A'..'Z'
 
     private fun updateComposing() {
         val ic = currentInputConnection ?: return
-        if (telex.isEmpty) {
-            ic.commitText("", 1)
-        } else {
-            ic.setComposingText(telex.text(), 1)
-        }
+        if (telex.isEmpty) ic.commitText("", 1) else ic.setComposingText(telex.text(), 1)
     }
 
     private fun finishTelex() {
@@ -1118,9 +953,30 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
 
     private fun onKey(key: Key) {
         if (translateOpen) {
-            onTranslateKey(key)
+            handleTranslateModeKey(key)
             return
         }
+        applyKeyToApp(key)
+    }
+
+    /** Gõ trong chế độ dịch: hiện song song lên khung chat; Enter/Dịch sẽ dịch & thay thế. */
+    private fun handleTranslateModeKey(key: Key) {
+        if (key.kind == Kind.ENTER) {
+            finishTelex()
+            translateNow(false)
+            return
+        }
+        // gõ/xóa/ký tự -> tác động trực tiếp lên khung chat
+        applyKeyToApp(key)
+        if (key.kind != Kind.SHIFT) { // SHIFT chỉ đổi trạng thái, không đổi nội dung
+            onTranslateInputChanged()
+        } else {
+            // shift có thể ảnh hưởng ký tự tiếp theo nhưng nội dung hiện tại không đổi
+            onTranslateInputChanged(retranslate = false)
+        }
+    }
+
+    private fun applyKeyToApp(key: Key) {
         when (key.kind) {
             Kind.TEXT, Kind.SHIFT, Kind.DELETE, Kind.SPACER -> Unit
             else -> finishTelex()
@@ -1185,23 +1041,20 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val now = SystemClock.uptimeMillis()
         val before = ic.getTextBeforeCursor(40, 0)?.toString().orEmpty()
         var sep = " "
-        var doAutoCorrect = autoCorrect
-
         if (now - lastSpaceTap < 400 && before.length >= 2 &&
             before.last() == ' ' && before[before.length - 2].isLetterOrDigit()
         ) {
-            // double-space -> ". "
             val word = extractLastWord(before.dropLast(1))
             ic.deleteSurroundingText(1, 0)
             ic.commitText(". ", 1)
             lastSpaceTap = 0
             sep = ". "
-            if (doAutoCorrect) requestAutoCorrect(word, sep)
+            requestAutoCorrect(word, sep)
         } else {
             val word = extractLastWord(before)
             ic.commitText(" ", 1)
             lastSpaceTap = now
-            if (doAutoCorrect) requestAutoCorrect(word, sep)
+            requestAutoCorrect(word, sep)
         }
         refreshShift()
     }
@@ -1212,12 +1065,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         var i = text.length - 1
         while (i >= 0) {
             val c = text[i]
-            if (c.isLetter() || c == '\'' || c.code > 127) {
-                sb.append(c)
-                i--
-            } else {
-                break
-            }
+            if (c.isLetter() || c == '\'' || c.code > 127) { sb.append(c); i-- } else break
         }
         return sb.reverse().toString()
     }
@@ -1229,8 +1077,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val action = options and EditorInfo.IME_MASK_ACTION
         val noEnterAction = (options and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
         if (info != null && !noEnterAction &&
-            action != EditorInfo.IME_ACTION_NONE &&
-            action != EditorInfo.IME_ACTION_UNSPECIFIED
+            action != EditorInfo.IME_ACTION_NONE && action != EditorInfo.IME_ACTION_UNSPECIFIED
         ) {
             ic.performEditorAction(action)
         } else {
@@ -1242,22 +1089,33 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     // ---------------------------------------------------------------- tự sửa chính tả
 
     private fun requestAutoCorrect(word: String, separator: String) {
-        if (!autoCorrect) return
-        if (word.length < 2) return
-        // bỏ qua nếu toàn ký tự không phải chữ latin cơ bản (tránh phá tiếng Việt có dấu phức tạp đã đúng)
-        // nhưng vẫn thử với spell checker nếu có; yêu cầu tối thiểu: có chữ cái
-        acWord = word
-        acWordLen = word.length
-        acSeparator = separator
+        if (!autoCorrect || word.length < 2) return
+        val lower = word.lowercase(Locale.getDefault())
+        val fix = commonFixes[lower]
+        if (fix != null) {
+            val replacement = matchCase(word, fix)
+            val ic = currentInputConnection ?: return
+            val len = word.length
+            handler.post {
+                val before = currentInputConnection?.getTextBeforeCursor(len + separator.length + 2, 0)?.toString().orEmpty()
+                if (before.endsWith(word + separator)) {
+                    currentInputConnection?.deleteSurroundingText(len + separator.length, 0)
+                    currentInputConnection?.commitText(replacement + separator, 1)
+                }
+            }
+            return
+        }
+        acWord = word; acWordLen = word.length; acSeparator = separator
         val locale = if (vietnamese) Locale("vi", "VN") else Locale("en", "US")
         try {
-            if (scSession == null) {
+            if (scSession == null || scLocale != locale) {
+                try { scSession?.close() } catch (_: Exception) {}
                 val tsm = getSystemService(Context.TEXT_SERVICES_MANAGER_SERVICE) as? TextServicesManager
                 scSession = tsm?.newSpellCheckerSession(null, locale, this, true)
+                scLocale = locale
             }
-            scSession?.getSuggestions(TextInfo(word), 3)
-        } catch (_: Exception) {
-        }
+            scSession?.getSuggestions(TextInfo(word), 5)
+        } catch (_: Exception) {}
     }
 
     override fun onGetSuggestions(results: Array<out SuggestionsInfo>?) {
@@ -1272,31 +1130,33 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val looksTypo = (attrs and SuggestionsInfo.RESULT_ATTR_LOOKS_LIKE_TYPO) != 0
         val hasRecommended = (attrs and SuggestionsInfo.RESULT_ATTR_HAS_RECOMMENDED_SUGGESTIONS) != 0
         if (inDict && !looksTypo) return
-        if (info.suggestionsCount <= 0) return
-        val suggestion = info.getSuggestionAt(0) ?: return
-        if (suggestion.isBlank() || suggestion.equals(word, ignoreCase = true)) return
-        // chỉ tự sửa khi chắc chắn là lỗi gõ hoặc có gợi ý khuyến nghị
-        if (!looksTypo && !hasRecommended) return
+        var best: String? = null
+        for (i in 0 until info.suggestionsCount) {
+            val s = info.getSuggestionAt(i) ?: continue
+            if (s.isNotBlank() && !s.equals(word, ignoreCase = true)) { best = s; break }
+        }
+        if (best == null) return
+        val shouldApply = looksTypo || hasRecommended || !inDict
+        if (!shouldApply) return
 
         handler.post {
             val ic = currentInputConnection ?: return@post
             val before = ic.getTextBeforeCursor(len + sep.length + 2, 0)?.toString().orEmpty()
             if (before.endsWith(word + sep)) {
-                val replacement = matchCase(word, suggestion)
+                val replacement = matchCase(word, best)
                 ic.deleteSurroundingText(len + sep.length, 0)
                 ic.commitText(replacement + sep, 1)
             }
         }
     }
 
-    override fun onGetSentenceSuggestions(results: Array<out SentenceSuggestionsInfo>?) {
-        // không dùng
-    }
+    override fun onGetSentenceSuggestions(results: Array<out SentenceSuggestionsInfo>?) {}
 
     private fun matchCase(original: String, suggestion: String): String {
         if (original.isEmpty() || suggestion.isEmpty()) return suggestion
+        val hasLetters = original.any { it.isLetter() }
         return when {
-            original.all { it.isUpperCase() || !it.isLetter() } -> suggestion.uppercase(Locale.getDefault())
+            hasLetters && original.all { it.isUpperCase() || !it.isLetter() } -> suggestion.uppercase(Locale.getDefault())
             original[0].isUpperCase() -> suggestion.replaceFirstChar {
                 if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString()
             }
@@ -1313,17 +1173,12 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     }
 
     private fun startVoice(mode: Int) {
-        if (voiceMode != 0) {
-            stopVoice(resetStatus = true)
-            return
-        }
+        if (voiceMode != 0) { stopVoice(resetStatus = true); return }
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            showVoiceStatus("Không hỗ trợ giọng nói", 2000)
-            return
+            showVoiceStatus("Không hỗ trợ giọng nói", 2000); return
         }
         if (!hasRecordAudioPermission()) {
             showVoiceStatus("Cần cấp quyền Micro", 2500)
-            // thử mở cài đặt quyền của app (từ IME có thể không mở được, nhưng cứ thử)
             try {
                 val i = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                     data = android.net.Uri.parse("package:$packageName")
@@ -1335,15 +1190,15 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         }
         finishTelex()
         try {
-            if (speechRecognizer == null) {
-                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            }
+            if (speechRecognizer == null) speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "vi-VN")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             }
+            voiceComposing = false
+            lastVoicePartialVi = ""
             speechRecognizer?.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     showVoiceStatus(if (mode == 2) "Nghe (VI→EN)..." else "Đang nghe...", 0)
@@ -1362,28 +1217,51 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
                         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Cần quyền Micro"
                         else -> "Lỗi giọng nói"
                     }
+                    // bỏ composing dang dở
+                    if (voiceComposing) {
+                        try { currentInputConnection?.finishComposingText() } catch (_: Exception) {}
+                        voiceComposing = false
+                    }
                     voiceMode = 0
                     showVoiceStatus(msg, 2000)
                 }
                 override fun onResults(results: Bundle?) {
+                    handler.removeCallbacks(voicePartialRunnable)
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     val text = matches?.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
                     val m = voiceMode
+                    val wasComposing = voiceComposing
                     voiceMode = 0
+                    voiceComposing = false
                     if (text.isBlank()) {
+                        if (wasComposing) try { currentInputConnection?.finishComposingText() } catch (_: Exception) {}
                         showVoiceStatus("Không nhận dạng được", 2000)
                         return
                     }
                     if (m == 2) {
                         showVoiceStatus("Đang dịch...", 0)
-                        translateVoiceToEnglish(text)
+                        translateVoiceFinal(text)
                     } else {
+                        commitVoiceText(text)
                         voiceStatus = null
-                        commitTextToApp(text)
                         rebuild()
                     }
                 }
-                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val partial = matches?.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+                    if (partial.isBlank()) return
+                    if (voiceMode == 1) {
+                        currentInputConnection?.setComposingText(partial, 1)
+                        voiceComposing = true
+                    } else if (voiceMode == 2) {
+                        if (partial != lastVoicePartialVi) {
+                            lastVoicePartialVi = partial
+                            handler.removeCallbacks(voicePartialRunnable)
+                            handler.postDelayed(voicePartialRunnable, 450)
+                        }
+                    }
+                }
                 override fun onEvent(eventType: Int, params: Bundle?) {}
             })
             voiceMode = mode
@@ -1395,56 +1273,48 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         }
     }
 
-    private fun stopVoice(resetStatus: Boolean) {
-        try { speechRecognizer?.cancel() } catch (_: Exception) {}
-        voiceMode = 0
-        if (resetStatus) {
-            voiceStatus = null
-            rebuild()
-        }
-    }
-
-    private fun showVoiceStatus(msg: String?, clearAfterMs: Long = 0) {
-        voiceStatus = msg
-        rebuild()
-        if (clearAfterMs > 0 && msg != null) {
-            val snapshot = msg
-            handler.postDelayed({
-                if (voiceStatus == snapshot && voiceMode == 0) {
-                    voiceStatus = null
-                    rebuild()
+    private fun runVoicePartialTranslate() {
+        val vi = lastVoicePartialVi
+        if (vi.isBlank() || voiceMode != 2) return
+        val job = ++voicePartialJob
+        Thread {
+            var out: String? = null
+            try { out = requestTranslation(vi, "en") } catch (_: Exception) {}
+            handler.post {
+                if (job != voicePartialJob || voiceMode != 2) return@post
+                if (!out.isNullOrEmpty()) {
+                    currentInputConnection?.setComposingText(out, 1)
+                    voiceComposing = true
                 }
-            }, clearAfterMs)
-        }
+            }
+        }.start()
     }
 
-    private fun translateVoiceToEnglish(text: String) {
+    private fun translateVoiceFinal(text: String) {
+        val job = ++voicePartialJob
         Thread {
             var out: String? = null
             var err = "Lỗi dịch"
             try {
                 out = requestTranslation(text, "en")
-            } catch (e: UnknownHostException) {
-                err = "Không có mạng"
-            } catch (e: SocketTimeoutException) {
-                err = "Hết thời gian, thử lại"
-            } catch (e: IOException) {
+            } catch (e: UnknownHostException) { err = "Không có mạng" }
+            catch (e: SocketTimeoutException) { err = "Hết thời gian, thử lại" }
+            catch (e: IOException) {
                 val msg = e.message.orEmpty()
                 err = when {
                     msg.contains("HTTP 429") -> "Bị giới hạn, thử lại sau"
                     msg.startsWith("HTTP") -> "Lỗi máy chủ, thử lại"
                     else -> "Lỗi mạng, thử lại"
                 }
-            } catch (_: Exception) {
-                err = "Lỗi dịch"
-            }
+            } catch (_: Exception) { err = "Lỗi dịch" }
             handler.post {
+                if (job != voicePartialJob) return@post
                 voiceStatus = null
                 if (!out.isNullOrEmpty()) {
-                    commitTextToApp(out)
+                    commitVoiceText(out)
                 } else {
-                    // nếu dịch lỗi, vẫn chèn nguyên văn tiếng Việt để không mất nội dung
-                    commitTextToApp(text)
+                    // lỗi dịch -> vẫn chèn tiếng Việt để không mất nội dung
+                    commitVoiceText(text)
                     showVoiceStatus(err, 2000)
                     return@post
                 }
@@ -1453,11 +1323,35 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         }.start()
     }
 
-    private fun commitTextToApp(text: String) {
+    private fun commitVoiceText(text: String) {
         if (text.isEmpty()) return
         val ic = currentInputConnection ?: return
-        finishTelex()
+        // chốt composing (partial) nếu có rồi chèn kết quả cuối
+        try { ic.finishComposingText() } catch (_: Exception) {}
+        voiceComposing = false
         ic.commitText(text, 1)
+    }
+
+    private fun stopVoice(resetStatus: Boolean) {
+        handler.removeCallbacks(voicePartialRunnable)
+        try { speechRecognizer?.cancel() } catch (_: Exception) {}
+        if (voiceComposing) {
+            try { currentInputConnection?.finishComposingText() } catch (_: Exception) {}
+        }
+        voiceComposing = false
+        voiceMode = 0
+        if (resetStatus) { voiceStatus = null; rebuild() }
+    }
+
+    private fun showVoiceStatus(msg: String?, clearAfterMs: Long = 0) {
+        voiceStatus = msg
+        rebuild()
+        if (clearAfterMs > 0 && msg != null) {
+            val snapshot = msg
+            handler.postDelayed({
+                if (voiceStatus == snapshot && voiceMode == 0) { voiceStatus = null; rebuild() }
+            }, clearAfterMs)
+        }
     }
 
     // ---------------------------------------------------------------- tự viết hoa
@@ -1470,21 +1364,29 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
 
     private fun refreshShift(forceRebuild: Boolean = false) {
         val before = shift
-        if (layer == Layer.LETTERS && shift == Shift.OFF && capsMode() != 0) {
-            shift = Shift.ON
-        }
+        if (layer == Layer.LETTERS && shift == Shift.OFF && capsMode() != 0) shift = Shift.ON
         if (shift != before || forceRebuild) rebuild()
     }
 
-    // ---------------------------------------------------------------- bảng dịch
+    // ---------------------------------------------------------------- bảng dịch (gõ song song lên khung chat)
 
-    private fun trSourceText(): String = trCommitted + trTelex.text()
+    private fun currentTranslateSource(): String {
+        val ic = currentInputConnection ?: return ""
+        val sel = ic.getSelectedText(0)?.toString()
+        if (!sel.isNullOrEmpty()) return sel
+        val req = ExtractedTextRequest().apply { hintMaxChars = 10000; hintMaxLines = 300 }
+        val et = ic.getExtractedText(req, 0)
+        if (et != null && et.text != null) return et.text.toString()
+        val before = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
+        val after = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
+        return before + after
+    }
 
-    private fun finishTrTelex() {
-        if (!trTelex.isEmpty) {
-            trCommitted += trTelex.text()
-            trTelex.reset()
-        }
+    private fun onTranslateInputChanged(retranslate: Boolean = true) {
+        trResult = ""
+        if (translateStatus != null && !trTranslating) translateStatus = null
+        if (retranslate) scheduleTrAutoTranslate()
+        rebuild()
     }
 
     private fun resetTranslateState() {
@@ -1494,28 +1396,15 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         trPendingApply = false
         translateStatus = null
         trResult = ""
-        trCommitted = ""
-        trTelex.reset()
-        trSnapUseSelection = false
-        trSnapSelected = ""
-        trSnapBefore = ""
-        trSnapAfter = ""
+        trUseSelection = false
         translateJob++
     }
 
     private fun openTranslate() {
         finishTelex()
         val ic = currentInputConnection
-        val selected = ic?.getSelectedText(0)?.toString().orEmpty()
-        val before = ic?.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
-        val after = ic?.getTextAfterCursor(5000, 0)?.toString().orEmpty()
-        trSnapUseSelection = selected.isNotEmpty()
-        trSnapSelected = selected
-        trSnapBefore = before
-        trSnapAfter = after
-        val source = if (trSnapUseSelection) selected else before + after
-        trCommitted = source
-        trTelex.reset()
+        val sel = ic?.getSelectedText(0)?.toString().orEmpty()
+        trUseSelection = sel.isNotEmpty()
         trResult = ""
         translateStatus = null
         trTranslating = false
@@ -1523,13 +1412,13 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         translateOpen = true
         layer = Layer.LETTERS
         rebuild()
-        if (source.isNotBlank()) {
+        if (currentTranslateSource().isNotBlank()) {
+            // lấy nội dung đang gõ/đang chọn và dịch, thay thế trực tiếp lên khung chat
             translateNow(auto = false)
         }
     }
 
     private fun closeTranslate() {
-        finishTrTelex()
         handler.removeCallbacks(trAutoTranslate)
         translateJob++
         translateOpen = false
@@ -1537,82 +1426,13 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         trPendingApply = false
         translateStatus = null
         trResult = ""
-        trCommitted = ""
-        trTelex.reset()
-        rebuild()
-    }
-
-    private fun onTranslateKey(key: Key) {
-        when (key.kind) {
-            Kind.TEXT -> {
-                val text = displayLabel(key)
-                if (trTelexOn() && text.length == 1 && isAsciiLetter(text[0])) {
-                    trTelex.feed(text[0])
-                } else {
-                    finishTrTelex()
-                    trCommitted += text
-                }
-                if (shift == Shift.ON) shift = Shift.OFF
-            }
-            Kind.SPACE -> {
-                finishTrTelex()
-                val now = SystemClock.uptimeMillis()
-                if (now - lastSpaceTap < 400 && trCommitted.endsWith(" ") && trCommitted.length >= 2 &&
-                    trCommitted[trCommitted.length - 2].isLetterOrDigit()
-                ) {
-                    trCommitted = trCommitted.dropLast(1) + ". "
-                    lastSpaceTap = 0
-                } else {
-                    trCommitted += " "
-                    lastSpaceTap = now
-                }
-            }
-            Kind.ENTER -> {
-                finishTrTelex()
-                translateNow(auto = false)
-                return
-            }
-            Kind.DELETE -> {
-                if (!trTelex.isEmpty) {
-                    trTelex.backspace()
-                } else if (trCommitted.isNotEmpty()) {
-                    trCommitted = trCommitted.dropLast(1)
-                }
-            }
-            Kind.SHIFT -> {
-                onShiftTap()
-                return
-            }
-            Kind.LANG -> {
-                finishTrTelex()
-                vietnamese = !vietnamese
-                prefs().edit().putBoolean("vietnamese", vietnamese).apply()
-            }
-            Kind.TO_SYMBOLS_1 -> {
-                finishTrTelex()
-                layer = Layer.SYMBOLS_1
-            }
-            Kind.TO_SYMBOLS_2 -> {
-                finishTrTelex()
-                layer = Layer.SYMBOLS_2
-            }
-            Kind.TO_LETTERS -> {
-                finishTrTelex()
-                layer = Layer.LETTERS
-                if (shift == Shift.OFF && capsMode() != 0) shift = Shift.ON
-            }
-            Kind.SPACER -> return
-        }
-        trResult = ""
-        if (translateStatus != null && !trTranslating) translateStatus = null
-        refreshShift()
-        scheduleTrAutoTranslate()
+        trUseSelection = false
         rebuild()
     }
 
     private fun scheduleTrAutoTranslate() {
         handler.removeCallbacks(trAutoTranslate)
-        if (translateOpen && trSourceText().isNotBlank()) {
+        if (translateOpen && currentTranslateSource().isNotBlank()) {
             handler.postDelayed(trAutoTranslate, 700)
         }
     }
@@ -1622,26 +1442,19 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             val bar = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
-                )
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
             }
-            bar.addView(chip("Dịch", 1.1f, c) { openTranslate() })
+            bar.addView(chip("Dịch", 1.0f, c) { openTranslate() })
             val micViLabel = if (voiceMode == 1) "⏹" else "🎤"
             val micEnLabel = if (voiceMode == 2) "⏹" else "VI→EN"
-            bar.addView(chip(micViLabel, 0.8f, c, accent = voiceMode == 1) { startVoice(1) })
-            bar.addView(chip(micEnLabel, 1.0f, c, accent = voiceMode == 2) { startVoice(2) })
+            bar.addView(chip(micViLabel, 0.7f, c, accent = voiceMode == 1) { startVoice(1) })
+            bar.addView(chip(micEnLabel, 0.9f, c, accent = voiceMode == 2) { startVoice(2) })
             if (voiceStatus != null) {
-                bar.addView(labelChip(voiceStatus!!, 1.6f, c))
+                bar.addView(labelChip(voiceStatus!!, 1.7f, c))
             } else {
-                bar.addView(View(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.6f)
-                })
+                bar.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.7f) })
             }
-            bar.addView(chip("⌨", 0.8f, c) {
-                showKbSettings = !showKbSettings
-                rebuild()
-            })
+            bar.addView(chip("⌨", 0.7f, c) { showKbSettings = !showKbSettings; rebuild() })
             return bar
         }
         return buildTranslatePanel(c)
@@ -1650,44 +1463,34 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     private fun buildTranslatePanel(c: Colors): View {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
         val control = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
         }
-        control.addView(chip("Sang: " + targets[targetIndex].name, 2.4f, c) {
+        control.addView(chip("Sang: " + targets[targetIndex].name, 2.3f, c) {
             targetIndex = (targetIndex + 1) % targets.size
             rebuild()
-            if (trSourceText().isNotBlank()) translateNow(auto = false)
+            if (currentTranslateSource().isNotBlank()) translateNow(auto = false)
         })
         val actionLabel = when {
             trTranslating -> "Đang dịch..."
             translateStatus != null && trResult.isEmpty() -> translateStatus!!
             else -> "Dịch"
         }
-        control.addView(chip(actionLabel, 1.2f, c, accent = true) {
-            translateNow(auto = false)
-        })
-        control.addView(chip("⌨", 0.7f, c) {
-            showKbSettings = !showKbSettings
-            rebuild()
-        })
-        control.addView(chip("✕", 0.7f, c) { closeTranslate() })
+        control.addView(chip(actionLabel, 1.1f, c, accent = true) { translateNow(auto = false) })
+        control.addView(chip("⌨", 0.6f, c) { showKbSettings = !showKbSettings; rebuild() })
+        control.addView(chip("✕", 0.6f, c) { closeTranslate() })
         panel.addView(control)
 
-        val srcText = trSourceText()
+        val srcText = currentTranslateSource()
         val srcView = TextView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(40),
-            ).apply { setMargins(dp(3), dp(2), dp(3), dp(2)) }
-            text = if (srcText.isEmpty()) "Nhập văn bản cần dịch..." else srcText
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40))
+                .apply { setMargins(dp(3), dp(2), dp(3), dp(2)) }
+            text = if (srcText.isEmpty()) "Nhập văn bản cần dịch (hiện song song lên khung chat)..." else srcText
             setTextColor(if (srcText.isEmpty()) Color.GRAY else c.text)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
@@ -1704,9 +1507,8 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             else -> "Bản dịch sẽ hiện ở đây"
         }
         val resView = TextView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
-            ).apply { setMargins(dp(3), dp(2), dp(3), dp(4)) }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
+                .apply { setMargins(dp(3), dp(2), dp(3), dp(4)) }
             text = resLabel
             setTextColor(if (trResult.isNotEmpty() && !trTranslating) c.text else Color.GRAY)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -1716,7 +1518,6 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             maxLines = 2
         }
         panel.addView(resView)
-
         return panel
     }
 
@@ -1731,10 +1532,7 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         setTextColor(if (accent) Color.WHITE else c.text)
         background = rounded(if (accent) c.accent else c.special, panelCornerDp())
         isClickable = true
-        setOnClickListener {
-            performKeyHaptic(it)
-            onClick()
-        }
+        setOnClickListener { performKeyHaptic(it); onClick() }
     }
 
     private fun labelChip(label: String, weight: Float, c: Colors): View = TextView(this).apply {
@@ -1754,26 +1552,20 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         if (clearAfterMs > 0) {
             val snapshot = status
             handler.postDelayed({
-                if (translateStatus == snapshot) {
-                    translateStatus = null
-                    rebuild()
-                }
+                if (translateStatus == snapshot) { translateStatus = null; rebuild() }
             }, clearAfterMs)
         }
     }
 
     private fun translateNow(auto: Boolean = false) {
         handler.removeCallbacks(trAutoTranslate)
-        finishTrTelex()
-        val source = trSourceText()
+        finishTelex()
+        val source = currentTranslateSource()
         if (source.isBlank()) {
             if (!auto) setTrStatus("Chưa có chữ", 2000)
             return
         }
-        if (source.length > 4500) {
-            setTrStatus("Quá dài", 2500)
-            return
-        }
+        if (source.length > 4500) { setTrStatus("Quá dài", 2500); return }
 
         val job = ++translateJob
         val target = targets[targetIndex].code
@@ -1788,20 +1580,16 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             var err = "Lỗi dịch"
             try {
                 out = requestTranslation(source, target)
-            } catch (e: UnknownHostException) {
-                err = "Không có mạng"
-            } catch (e: SocketTimeoutException) {
-                err = "Hết thời gian, thử lại"
-            } catch (e: IOException) {
+            } catch (e: UnknownHostException) { err = "Không có mạng" }
+            catch (e: SocketTimeoutException) { err = "Hết thời gian, thử lại" }
+            catch (e: IOException) {
                 val msg = e.message.orEmpty()
                 err = when {
                     msg.contains("HTTP 429") -> "Bị giới hạn, thử lại sau"
                     msg.startsWith("HTTP") -> "Lỗi máy chủ, thử lại"
                     else -> "Lỗi mạng, thử lại"
                 }
-            } catch (_: Exception) {
-                err = "Lỗi dịch"
-            }
+            } catch (_: Exception) { err = "Lỗi dịch" }
             handler.post { onTrTranslated(job, out, err) }
         }.start()
     }
@@ -1812,41 +1600,34 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val shouldApply = trPendingApply
         trPendingApply = false
         if (out.isNullOrEmpty()) {
-            translateStatus = err
-            trResult = ""
-            rebuild()
+            translateStatus = err; trResult = ""; rebuild()
         } else {
-            trResult = out
-            translateStatus = null
-            if (shouldApply) {
-                applyTranslation()
-            } else {
-                rebuild()
-            }
+            trResult = out; translateStatus = null
+            if (shouldApply) applyTranslation() else rebuild()
         }
     }
 
+    /** Thay thế nội dung đang dịch trong khung chat bằng bản dịch. */
     private fun applyTranslation() {
-        if (trResult.isEmpty()) {
-            setTrStatus("Chưa có bản dịch", 1500)
-            return
-        }
-        val ic = currentInputConnection
-        if (ic == null) {
-            setTrStatus("Không thể chèn", 1500)
-            return
-        }
+        if (trResult.isEmpty()) { setTrStatus("Chưa có bản dịch", 1500); return }
+        val ic = currentInputConnection ?: run { setTrStatus("Không thể chèn", 1500); return }
         ic.beginBatchEdit()
         try {
-            if (trSnapUseSelection) {
+            ic.finishComposingText()
+            val sel = ic.getSelectedText(0)?.toString()
+            if (!sel.isNullOrEmpty() && trUseSelection) {
                 ic.commitText(trResult, 1)
             } else {
-                val nowBefore = ic.getTextBeforeCursor(5000, 0)?.toString().orEmpty()
-                val nowAfter = ic.getTextAfterCursor(5000, 0)?.toString().orEmpty()
-                if (nowBefore == trSnapBefore && nowAfter == trSnapAfter) {
-                    ic.deleteSurroundingText(nowBefore.length, nowAfter.length)
+                // thay thế toàn bộ nội dung (văn bản đang hiện song song trên khung chat)
+                val req = ExtractedTextRequest().apply { hintMaxChars = 100000 }
+                val et = ic.getExtractedText(req, 0)
+                if (et != null && et.text != null) {
+                    ic.setSelection(0, et.text.length)
                     ic.commitText(trResult, 1)
                 } else {
+                    val beforeLen = ic.getTextBeforeCursor(10000, 0)?.length ?: 0
+                    val afterLen = ic.getTextAfterCursor(10000, 0)?.length ?: 0
+                    ic.deleteSurroundingText(beforeLen, afterLen)
                     ic.commitText(trResult, 1)
                 }
             }
@@ -1861,7 +1642,6 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
         val params = "client=gtx&sl=auto&tl=" + URLEncoder.encode(target, "UTF-8") + "&dt=t"
         val base = "https://translate.googleapis.com/translate_a/single"
         val usePost = encodedText.length > 1500
-
         val url = if (usePost) URL(base) else URL("$base?$params&q=$encodedText")
         val conn = url.openConnection() as HttpURLConnection
         try {
@@ -1873,13 +1653,8 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
             if (usePost) {
                 conn.requestMethod = "POST"
                 conn.doOutput = true
-                conn.setRequestProperty(
-                    "Content-Type",
-                    "application/x-www-form-urlencoded; charset=UTF-8",
-                )
-                conn.outputStream.use {
-                    it.write("$params&q=$encodedText".toByteArray(Charsets.UTF_8))
-                }
+                conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                conn.outputStream.use { it.write("$params&q=$encodedText".toByteArray(Charsets.UTF_8)) }
             }
             val code = conn.responseCode
             if (code != 200) throw IOException("HTTP $code")
@@ -1900,7 +1675,5 @@ class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellChecke
     }
 
     private fun dp(value: Int): Int =
-        TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics,
-        ).toInt()
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).toInt()
 }
