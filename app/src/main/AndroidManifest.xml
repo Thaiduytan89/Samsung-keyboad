@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Chỉ dùng khi bấm nút Dịch: gửi đúng đoạn chữ cần dịch lên dịch vụ dịch của Google. -->
+    <!-- Chỉ dùng khi bấm nút Dịch/nhập liệu giọng nói dịch: gửi đúng đoạn chữ cần dịch/nhận dạng lên dịch vụ của Google. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="false"

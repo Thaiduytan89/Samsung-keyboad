@@ -1,6 +1,9 @@
 package com.example.samkeyboard
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
@@ -8,9 +11,13 @@ import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
 import android.media.AudioManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
@@ -21,6 +28,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
+import android.view.textservice.SentenceSuggestionsInfo
+import android.view.textservice.SpellCheckerSession
+import android.view.textservice.SuggestionsInfo
+import android.view.textservice.TextInfo
+import android.view.textservice.TextServicesManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -31,18 +43,22 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
  * Bàn phím QWERTY tối ưu cho màn hình gập (Oppo Find N5 trong/ngoài):
- *  - Màn hình trong (rộng): bàn phím tách đôi kiểu Gboard + dãy số, gõ 2 tay thoải mái.
+ *  - Màn hình trong (rộng): bàn phím tách đôi kiểu Gboard + dãy số, dấu cách liền, gõ 2 tay.
  *  - Màn hình ngoài (gập lại): giao diện bàn phím bình thường.
+ *  - Tinh chỉnh (bố cục, chiều cao, lề mép, khoảng cách phím, theme, màu, âm thanh, sửa lỗi)
+ *    được lưu RIÊNG BIỆT cho từng màn hình (trong/ngoài).
  *  - Gõ tiếng Việt Telex (QWERTY) và English (phím VI/EN).
+ *  - Tự sửa chính tả khi bấm dấu cách (tuỳ chọn).
+ *  - Nhập liệu giọng nói tiếng Việt; nhập liệu giọng nói tiếng Việt và dịch sang tiếng Anh.
  *  - Dịch sang English, 繁體中文, မြန်မာ: bấm Dịch để dịch và thay thế trực tiếp vào ô chat.
- *  - Giao diện iPhone (mặc định) / Samsung, đổi màu bàn phím.
- *  - Tinh chỉnh chiều cao, lề mép, khoảng cách/kích thước phím; âm thanh gõ; popup mượt.
+ *  - Giao diện iPhone (mặc định) / Samsung, đổi màu bàn phím, popup mượt.
  */
-class SamKeyboardService : InputMethodService() {
+class SamKeyboardService : InputMethodService(), SpellCheckerSession.SpellCheckerSessionListener {
 
     private enum class Layer { LETTERS, SYMBOLS_1, SYMBOLS_2 }
     private enum class Shift { OFF, ON, LOCK }
@@ -82,8 +98,8 @@ class SamKeyboardService : InputMethodService() {
     private var lastShiftTap = 0L
     private var lastSpaceTap = 0L
 
-    // Tùy chỉnh bố cục & giao diện
-    private var wideLayoutPref = "split" // "normal", "split", "floating" (áp dụng khi màn hình rộng/trong)
+    // ----- Tùy chỉnh (lưu riêng biệt cho từng màn hình: trong=rộng, ngoài=hẹp) -----
+    private var wideLayoutPref = "split" // "normal", "split", "floating" (màn hình trong)
     private var keyHeightPref = 52
     private var floatMarginStartDp = 8
     private var floatMarginBottomDp = 8
@@ -92,14 +108,12 @@ class SamKeyboardService : InputMethodService() {
     private var showDeepTune = false
     private var kbStyle = "iphone" // "iphone", "samsung"
     private var kbColorIndex = 0
-
-    // Tinh chỉnh sâu: kích thước/khoảng cách
     private var sideInsetDp = 0      // lề từ mép màn hình vào giữa
     private var keyHGapDp = 3        // khoảng cách ngang giữa các phím
     private var keyVGapDp = 4        // khoảng cách dọc giữa các phím
-
-    // Âm thanh gõ
     private var soundMode = 1
+    private var autoCorrect = true
+
     private val soundModes = listOf("Tắt", "Mặc định", "Nhẹ", "Click", "Rõ")
 
     private val kbColors = listOf(
@@ -129,7 +143,7 @@ class SamKeyboardService : InputMethodService() {
     private var targetIndex = 0
     private var translateJob = 0
 
-    // Bảng dịch: gõ và dịch, bấm Dịch/Enter sẽ thay thế trực tiếp vào ô chat
+    // Bảng dịch
     private var trCommitted = ""
     private val trTelex = TelexEngine()
     private var trResult = ""
@@ -139,6 +153,17 @@ class SamKeyboardService : InputMethodService() {
     private var trSnapSelected = ""
     private var trSnapBefore = ""
     private var trSnapAfter = ""
+
+    // Tự sửa chính tả
+    private var scSession: SpellCheckerSession? = null
+    private var acWord: String? = null
+    private var acWordLen: Int = 0
+    private var acSeparator: String = " "
+
+    // Nhập liệu giọng nói
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var voiceMode: Int = 0 // 0: không, 1: VI, 2: VI->EN
+    private var voiceStatus: String? = null
 
     private val repeatDelete = object : Runnable {
         override fun run() {
@@ -155,17 +180,7 @@ class SamKeyboardService : InputMethodService() {
         super.onCreate()
         val p = prefs()
         vietnamese = p.getBoolean("vietnamese", true)
-        wideLayoutPref = p.getString("kb_wide_layout", "split") ?: "split"
-        keyHeightPref = p.getInt("kb_height", 52)
-        floatMarginStartDp = p.getInt("kb_fx", 8)
-        floatMarginBottomDp = p.getInt("kb_fy", 8)
-        floatWidthDp = p.getInt("kb_fw", 340)
-        kbStyle = p.getString("kb_style", "iphone") ?: "iphone"
-        kbColorIndex = p.getInt("kb_color", 0).coerceIn(0, kbColors.lastIndex)
-        sideInsetDp = p.getInt("kb_side_inset", 0)
-        keyHGapDp = p.getInt("kb_h_gap", 3)
-        keyVGapDp = p.getInt("kb_v_gap", 4)
-        soundMode = p.getInt("kb_sound", 1).coerceIn(0, soundModes.lastIndex)
+        loadProfileSettings()
     }
 
     override fun onCreateInputView(): View {
@@ -199,6 +214,7 @@ class SamKeyboardService : InputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         handler.removeCallbacks(repeatDelete)
+        stopVoice(resetStatus = false)
         hidePopup()
         finishTelex()
         resetTranslateState()
@@ -207,7 +223,7 @@ class SamKeyboardService : InputMethodService() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // Tự tối ưu khi gập/mở: màn hình trong (rộng) -> tách đôi, màn hình ngoài -> bình thường
+        loadProfileSettings()
         rebuild()
     }
 
@@ -222,7 +238,6 @@ class SamKeyboardService : InputMethodService() {
         super.onUpdateSelection(
             oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd,
         )
-        // Người dùng đưa con trỏ đi chỗ khác: kết thúc từ đang gõ dở.
         if (!telex.isEmpty &&
             (candidatesStart == -1 || newSelStart != candidatesEnd || newSelEnd != candidatesEnd)
         ) {
@@ -232,24 +247,64 @@ class SamKeyboardService : InputMethodService() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        try { scSession?.close() } catch (_: Exception) {}
+        scSession = null
+        try { speechRecognizer?.destroy() } catch (_: Exception) {}
+        speechRecognizer = null
         super.onDestroy()
     }
 
     private fun prefs() = getSharedPreferences("samkeyboard", Context.MODE_PRIVATE)
 
-    // ---------------------------------------------------------------- tối ưu màn hình (gập/mở)
+    // ---------------------------------------------------------------- hồ sơ theo màn hình
 
     private fun screenWidthDp(): Int = resources.configuration.screenWidthDp
     private fun screenHeightDp(): Int = resources.configuration.screenHeightDp
-    private fun isNarrowScreen(): Boolean = screenWidthDp() < 380
     private fun isWideScreen(): Boolean = screenWidthDp() >= 600
+    private fun profile(): String = if (isWideScreen()) "wide" else "narrow"
+    private fun pkey(name: String): String = profile() + "_" + name
+
+    private fun loadProfileSettings() {
+        val p = prefs()
+        val pf = profile()
+        fun ig(name: String, old: String, def: Int): Int = p.getInt("${pf}_$name", p.getInt(old, def))
+        fun sg(name: String, old: String, def: String): String = p.getString("${pf}_$name", p.getString(old, def)) ?: def
+        fun bg(name: String, old: String, def: Boolean): Boolean = p.getBoolean("${pf}_$name", p.getBoolean(old, def))
+
+        wideLayoutPref = sg("layout", "kb_wide_layout", "split")
+        keyHeightPref = ig("height", "kb_height", 52)
+        floatMarginStartDp = ig("fx", "kb_fx", 8)
+        floatMarginBottomDp = ig("fy", "kb_fy", 8)
+        floatWidthDp = ig("fw", "kb_fw", 340)
+        kbStyle = sg("style", "kb_style", "iphone")
+        kbColorIndex = ig("color", "kb_color", 0).coerceIn(0, kbColors.lastIndex)
+        sideInsetDp = ig("inset", "kb_side_inset", 0)
+        keyHGapDp = ig("hgap", "kb_h_gap", 3)
+        keyVGapDp = ig("vgap", "kb_v_gap", 4)
+        soundMode = ig("sound", "kb_sound", 1).coerceIn(0, soundModes.lastIndex)
+        autoCorrect = bg("autocorrect", "kb_autocorrect", true)
+    }
+
+    private fun saveInt(name: String, value: Int) {
+        prefs().edit().putInt(pkey(name), value).apply()
+    }
+
+    private fun saveString(name: String, value: String) {
+        prefs().edit().putString(pkey(name), value).apply()
+    }
+
+    private fun saveBool(name: String, value: Boolean) {
+        prefs().edit().putBoolean(pkey(name), value).apply()
+    }
+
+    // ---------------------------------------------------------------- tối ưu màn hình (gập/mở)
 
     private fun effectiveLayout(): KbLayout {
-        if (!isWideScreen()) return KbLayout.NORMAL // màn hình ngoài: bàn phím bình thường
+        if (!isWideScreen()) return KbLayout.NORMAL
         return when (wideLayoutPref) {
             "floating" -> KbLayout.FLOATING
             "normal" -> KbLayout.NORMAL
-            else -> KbLayout.SPLIT // màn hình trong: tách đôi 2 bên
+            else -> KbLayout.SPLIT
         }
     }
 
@@ -257,9 +312,8 @@ class SamKeyboardService : InputMethodService() {
         val mode = effectiveLayout()
         val adj = when {
             mode == KbLayout.SPLIT -> 4
-            isNarrowScreen() -> -2
             isWideScreen() -> 2
-            else -> 0
+            else -> -2
         }
         return (keyHeightPref + adj).coerceIn(36, 78)
     }
@@ -268,7 +322,7 @@ class SamKeyboardService : InputMethodService() {
         val base = when (effectiveLayout()) {
             KbLayout.FLOATING -> 2
             KbLayout.SPLIT -> 6
-            else -> if (isNarrowScreen()) 2 else 3
+            else -> if (screenWidthDp() < 380) 2 else 3
         }
         return (base + sideInsetDp).coerceAtLeast(0)
     }
@@ -302,7 +356,6 @@ class SamKeyboardService : InputMethodService() {
             lp.bottomMargin = dp(floatMarginBottomDp)
             root.setPadding(dp(3), dp(4), dp(3), dp(6))
         } else {
-            // NORMAL & SPLIT: gộp đáy (SPLIT trải rộng để hai nửa sát hai bên)
             lp.width = ViewGroup.LayoutParams.MATCH_PARENT
             lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
             lp.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
@@ -341,6 +394,7 @@ class SamKeyboardService : InputMethodService() {
         return when (layer) {
             Layer.LETTERS -> {
                 val rows = mutableListOf<List<Key>>()
+                // Dãy số trên màn hình trong (rộng)
                 if (isWideScreen()) {
                     rows.add(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0").map { t(it) })
                 }
@@ -377,23 +431,20 @@ class SamKeyboardService : InputMethodService() {
         }
     }
 
-    /** Bàn phím tách đôi kiểu Gboard: dãy số + nhân đôi G (giữa hàng 2) và V (giữa hàng 3). */
+    /** Bàn phím tách đôi kiểu Gboard (màn hình trong): dãy số, G/V lặp, dấu cách liền 1 phím. */
     private fun splitLayout(): List<List<Key>> {
         val g = splitGapWeight()
+        val spaceW = 5.0f + g // dấu cách nối dài chung 1 phím trên giao diện màn hình trong
         val bottomLetters = listOf(
             Key(Kind.TO_SYMBOLS_1, "123", 1.25f),
             Key(Kind.LANG, "", 1.0f),
-            Key(Kind.SPACE, "", 2.5f),
-            gap(g),
-            Key(Kind.SPACE, "", 2.5f),
+            Key(Kind.SPACE, "", spaceW),
             Key(Kind.ENTER, "return", 1.75f),
         )
         val bottomSymbols = listOf(
             Key(Kind.TO_LETTERS, "ABC", 1.25f),
             Key(Kind.LANG, "", 1.0f),
-            Key(Kind.SPACE, "", 2.5f),
-            gap(g),
-            Key(Kind.SPACE, "", 2.5f),
+            Key(Kind.SPACE, "", spaceW),
             Key(Kind.ENTER, "return", 1.75f),
         )
         return when (layer) {
@@ -591,19 +642,13 @@ class SamKeyboardService : InputMethodService() {
             )
         }
         if (wide) {
-            row1.addView(chip("Bình thường", 1.3f, c, accent = eff == KbLayout.NORMAL) {
-                setWideLayout("normal")
-            })
-            row1.addView(chip("Tách đôi", 1.2f, c, accent = eff == KbLayout.SPLIT) {
-                setWideLayout("split")
-            })
-            row1.addView(chip("Nổi", 0.9f, c, accent = eff == KbLayout.FLOATING) {
-                setWideLayout("floating")
-            })
+            row1.addView(chip("Bình thường", 1.2f, c, accent = eff == KbLayout.NORMAL) { setWideLayout("normal") })
+            row1.addView(chip("Tách đôi", 1.1f, c, accent = eff == KbLayout.SPLIT) { setWideLayout("split") })
+            row1.addView(chip("Nổi", 0.8f, c, accent = eff == KbLayout.FLOATING) { setWideLayout("floating") })
         } else {
-            row1.addView(labelChip("Màn hình ngoài: bàn phím thường", 3.4f, c))
+            row1.addView(labelChip("Màn hình ngoài (riêng)", 3.1f, c))
         }
-        row1.addView(chip("Đóng", 0.9f, c) {
+        row1.addView(chip("Đóng", 0.8f, c) {
             showKbSettings = false
             rebuild()
         })
@@ -616,11 +661,12 @@ class SamKeyboardService : InputMethodService() {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
             )
         }
-        row2.addView(labelChip("Cao", 0.7f, c))
-        row2.addView(chip("−", 0.5f, c) { adjustHeight(-2) })
-        row2.addView(labelChip("${effectiveKeyHeight()}", 0.5f, c))
-        row2.addView(chip("+", 0.5f, c) { adjustHeight(2) })
-        row2.addView(chip("Âm: ${soundModes[soundMode]}", 1.6f, c) { cycleSound() })
+        row2.addView(labelChip("Cao", 0.6f, c))
+        row2.addView(chip("−", 0.45f, c) { adjustHeight(-2) })
+        row2.addView(labelChip("${effectiveKeyHeight()}", 0.45f, c))
+        row2.addView(chip("+", 0.45f, c) { adjustHeight(2) })
+        row2.addView(chip("Âm: ${soundModes[soundMode]}", 1.4f, c) { cycleSound() })
+        row2.addView(chip(if (autoCorrect) "Sửa lỗi: Bật" else "Sửa lỗi: Tắt", 1.3f, c, accent = autoCorrect) { toggleAutoCorrect() })
         bar.addView(row2)
 
         val row3 = LinearLayout(this).apply {
@@ -631,9 +677,8 @@ class SamKeyboardService : InputMethodService() {
             )
         }
         val styleLabel = if (kbStyle == "samsung") "Giao diện: Samsung" else "Giao diện: iPhone"
-        row3.addView(chip(styleLabel, 1.5f, c) { cycleStyle() })
-        val colorLabel = "Màu: ${currentColor().name}"
-        row3.addView(chip(colorLabel, 1.3f, c) { cycleColor() })
+        row3.addView(chip(styleLabel, 1.4f, c) { cycleStyle() })
+        row3.addView(chip("Màu: ${currentColor().name}", 1.2f, c) { cycleColor() })
         val tuneLabel = if (showDeepTune) "Tinh chỉnh ▲" else "Tinh chỉnh ▼"
         row3.addView(chip(tuneLabel, 1.0f, c, accent = showDeepTune) {
             showDeepTune = !showDeepTune
@@ -649,28 +694,29 @@ class SamKeyboardService : InputMethodService() {
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
                 )
             }
-            row4.addView(labelChip("Lề", 0.6f, c))
+            row4.addView(labelChip("Lề", 0.5f, c))
             row4.addView(chip("−", 0.45f, c) { adjustSideInset(-2) })
-            row4.addView(labelChip("$sideInsetDp", 0.45f, c))
+            row4.addView(labelChip("$sideInsetDp", 0.4f, c))
             row4.addView(chip("+", 0.45f, c) { adjustSideInset(2) })
-            row4.addView(labelChip("Ngang", 0.7f, c))
+            row4.addView(labelChip("Ngang", 0.6f, c))
             row4.addView(chip("−", 0.45f, c) { adjustHGap(-1) })
-            row4.addView(labelChip("$keyHGapDp", 0.4f, c))
+            row4.addView(labelChip("$keyHGapDp", 0.35f, c))
             row4.addView(chip("+", 0.45f, c) { adjustHGap(1) })
+            row4.addView(labelChip("Dọc", 0.5f, c))
+            row4.addView(chip("−", 0.45f, c) { adjustVGap(-1) })
+            row4.addView(labelChip("$keyVGapDp", 0.35f, c))
+            row4.addView(chip("+", 0.45f, c) { adjustVGap(1) })
             bar.addView(row4)
 
             val row5 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(36),
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(30),
                 )
             }
-            row5.addView(labelChip("Dọc", 0.6f, c))
-            row5.addView(chip("−", 0.45f, c) { adjustVGap(-1) })
-            row5.addView(labelChip("$keyVGapDp", 0.45f, c))
-            row5.addView(chip("+", 0.45f, c) { adjustVGap(1) })
-            row5.addView(labelChip("Lề: mép→giữa, Ngang/Dọc: khoảng cách phím", 2.5f, c))
+            val screenLabel = if (wide) "Đang chỉnh: Màn hình trong (riêng)" else "Đang chỉnh: Màn hình ngoài (riêng)"
+            row5.addView(labelChip("$screenLabel — Lề: mép→giữa, Ngang/Dọc: khoảng cách phím", 4f, c))
             bar.addView(row5)
         }
 
@@ -708,25 +754,31 @@ class SamKeyboardService : InputMethodService() {
 
     private fun cycleStyle() {
         kbStyle = if (kbStyle == "iphone") "samsung" else "iphone"
-        prefs().edit().putString("kb_style", kbStyle).apply()
+        saveString("style", kbStyle)
         rebuild()
     }
 
     private fun cycleColor() {
         kbColorIndex = (kbColorIndex + 1) % kbColors.size
-        prefs().edit().putInt("kb_color", kbColorIndex).apply()
+        saveInt("color", kbColorIndex)
         rebuild()
     }
 
     private fun cycleSound() {
         soundMode = (soundMode + 1) % soundModes.size
-        prefs().edit().putInt("kb_sound", soundMode).apply()
+        saveInt("sound", soundMode)
+        rebuild()
+    }
+
+    private fun toggleAutoCorrect() {
+        autoCorrect = !autoCorrect
+        saveBool("autocorrect", autoCorrect)
         rebuild()
     }
 
     private fun setWideLayout(mode: String) {
         wideLayoutPref = mode
-        prefs().edit().putString("kb_wide_layout", mode).apply()
+        saveString("layout", mode)
         rebuild()
     }
 
@@ -768,38 +820,38 @@ class SamKeyboardService : InputMethodService() {
 
     private fun adjustFloatWidth(delta: Int) {
         floatWidthDp += delta
-        prefs().edit().putInt("kb_fw", floatWidthDp).apply()
+        saveInt("fw", floatWidthDp)
         applyRootLayout()
     }
 
     private fun saveFloatState() {
-        prefs().edit()
-            .putInt("kb_fx", floatMarginStartDp)
-            .putInt("kb_fy", floatMarginBottomDp)
-            .apply()
+        val p = prefs().edit()
+        p.putInt(pkey("fx"), floatMarginStartDp)
+        p.putInt(pkey("fy"), floatMarginBottomDp)
+        p.apply()
     }
 
     private fun adjustHeight(delta: Int) {
         keyHeightPref = (keyHeightPref + delta).coerceIn(36, 78)
-        prefs().edit().putInt("kb_height", keyHeightPref).apply()
+        saveInt("height", keyHeightPref)
         rebuild()
     }
 
     private fun adjustSideInset(delta: Int) {
         sideInsetDp = (sideInsetDp + delta).coerceIn(0, 60)
-        prefs().edit().putInt("kb_side_inset", sideInsetDp).apply()
+        saveInt("inset", sideInsetDp)
         rebuild()
     }
 
     private fun adjustHGap(delta: Int) {
         keyHGapDp = (keyHGapDp + delta).coerceIn(0, 10)
-        prefs().edit().putInt("kb_h_gap", keyHGapDp).apply()
+        saveInt("hgap", keyHGapDp)
         rebuild()
     }
 
     private fun adjustVGap(delta: Int) {
         keyVGapDp = (keyVGapDp + delta).coerceIn(0, 10)
-        prefs().edit().putInt("kb_v_gap", keyVGapDp).apply()
+        saveInt("vgap", keyVGapDp)
         rebuild()
     }
 
@@ -961,15 +1013,12 @@ class SamKeyboardService : InputMethodService() {
             else -> AudioManager.FX_KEYPRESS_STANDARD
         }
         val (fx, vol) = when (soundMode) {
-            2 -> baseFx to 0.35f          // Nhẹ
-            3 -> AudioManager.FX_KEY_CLICK to 0.8f // Click
-            4 -> baseFx to 1.0f           // Rõ
-            else -> baseFx to 0.65f       // Mặc định
+            2 -> baseFx to 0.35f
+            3 -> AudioManager.FX_KEY_CLICK to 0.8f
+            4 -> baseFx to 1.0f
+            else -> baseFx to 0.65f
         }
-        try {
-            am.playSoundEffect(fx, vol)
-        } catch (_: Exception) {
-        }
+        try { am.playSoundEffect(fx, vol) } catch (_: Exception) {}
     }
 
     private fun showPopup(anchor: View, text: String) {
@@ -1050,7 +1099,6 @@ class SamKeyboardService : InputMethodService() {
 
     private fun isAsciiLetter(c: Char) = c in 'a'..'z' || c in 'A'..'Z'
 
-    /** Hiển thị từ đang gõ dưới dạng "composing text" (có gạch chân) để còn sửa dấu được. */
     private fun updateComposing() {
         val ic = currentInputConnection ?: return
         if (telex.isEmpty) {
@@ -1060,7 +1108,6 @@ class SamKeyboardService : InputMethodService() {
         }
     }
 
-    /** Chốt từ đang gõ (khi gặp dấu cách, dấu câu, đổi trang phím, ...). */
     private fun finishTelex() {
         if (telex.isEmpty) return
         telex.reset()
@@ -1133,20 +1180,46 @@ class SamKeyboardService : InputMethodService() {
     }
 
     private fun onSpace() {
+        if (!telex.isEmpty) finishTelex()
         val ic = currentInputConnection ?: return
         val now = SystemClock.uptimeMillis()
-        val before = ic.getTextBeforeCursor(2, 0)
-        if (now - lastSpaceTap < 400 && before != null && before.length == 2 &&
-            before[1] == ' ' && before[0].isLetterOrDigit()
+        val before = ic.getTextBeforeCursor(40, 0)?.toString().orEmpty()
+        var sep = " "
+        var doAutoCorrect = autoCorrect
+
+        if (now - lastSpaceTap < 400 && before.length >= 2 &&
+            before.last() == ' ' && before[before.length - 2].isLetterOrDigit()
         ) {
+            // double-space -> ". "
+            val word = extractLastWord(before.dropLast(1))
             ic.deleteSurroundingText(1, 0)
             ic.commitText(". ", 1)
             lastSpaceTap = 0
+            sep = ". "
+            if (doAutoCorrect) requestAutoCorrect(word, sep)
         } else {
+            val word = extractLastWord(before)
             ic.commitText(" ", 1)
             lastSpaceTap = now
+            if (doAutoCorrect) requestAutoCorrect(word, sep)
         }
         refreshShift()
+    }
+
+    private fun extractLastWord(text: String): String {
+        if (text.isEmpty()) return ""
+        val sb = StringBuilder()
+        var i = text.length - 1
+        while (i >= 0) {
+            val c = text[i]
+            if (c.isLetter() || c == '\'' || c.code > 127) {
+                sb.append(c)
+                i--
+            } else {
+                break
+            }
+        }
+        return sb.reverse().toString()
     }
 
     private fun onEnter() {
@@ -1166,6 +1239,227 @@ class SamKeyboardService : InputMethodService() {
         refreshShift()
     }
 
+    // ---------------------------------------------------------------- tự sửa chính tả
+
+    private fun requestAutoCorrect(word: String, separator: String) {
+        if (!autoCorrect) return
+        if (word.length < 2) return
+        // bỏ qua nếu toàn ký tự không phải chữ latin cơ bản (tránh phá tiếng Việt có dấu phức tạp đã đúng)
+        // nhưng vẫn thử với spell checker nếu có; yêu cầu tối thiểu: có chữ cái
+        acWord = word
+        acWordLen = word.length
+        acSeparator = separator
+        val locale = if (vietnamese) Locale("vi", "VN") else Locale("en", "US")
+        try {
+            if (scSession == null) {
+                val tsm = getSystemService(Context.TEXT_SERVICES_MANAGER_SERVICE) as? TextServicesManager
+                scSession = tsm?.newSpellCheckerSession(null, locale, this, true)
+            }
+            scSession?.getSuggestions(TextInfo(word), 3)
+        } catch (_: Exception) {
+        }
+    }
+
+    override fun onGetSuggestions(results: Array<out SuggestionsInfo>?) {
+        val word = acWord ?: return
+        val sep = acSeparator
+        val len = acWordLen
+        acWord = null
+        if (results == null || results.isEmpty()) return
+        val info = results[0]
+        val attrs = info.suggestionsAttributes
+        val inDict = (attrs and SuggestionsInfo.RESULT_ATTR_IN_THE_DICTIONARY) != 0
+        val looksTypo = (attrs and SuggestionsInfo.RESULT_ATTR_LOOKS_LIKE_TYPO) != 0
+        val hasRecommended = (attrs and SuggestionsInfo.RESULT_ATTR_HAS_RECOMMENDED_SUGGESTIONS) != 0
+        if (inDict && !looksTypo) return
+        if (info.suggestionsCount <= 0) return
+        val suggestion = info.getSuggestionAt(0) ?: return
+        if (suggestion.isBlank() || suggestion.equals(word, ignoreCase = true)) return
+        // chỉ tự sửa khi chắc chắn là lỗi gõ hoặc có gợi ý khuyến nghị
+        if (!looksTypo && !hasRecommended) return
+
+        handler.post {
+            val ic = currentInputConnection ?: return@post
+            val before = ic.getTextBeforeCursor(len + sep.length + 2, 0)?.toString().orEmpty()
+            if (before.endsWith(word + sep)) {
+                val replacement = matchCase(word, suggestion)
+                ic.deleteSurroundingText(len + sep.length, 0)
+                ic.commitText(replacement + sep, 1)
+            }
+        }
+    }
+
+    override fun onGetSentenceSuggestions(results: Array<out SentenceSuggestionsInfo>?) {
+        // không dùng
+    }
+
+    private fun matchCase(original: String, suggestion: String): String {
+        if (original.isEmpty() || suggestion.isEmpty()) return suggestion
+        return when {
+            original.all { it.isUpperCase() || !it.isLetter() } -> suggestion.uppercase(Locale.getDefault())
+            original[0].isUpperCase() -> suggestion.replaceFirstChar {
+                if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString()
+            }
+            else -> suggestion.lowercase(Locale.getDefault())
+        }
+    }
+
+    // ---------------------------------------------------------------- nhập liệu giọng nói
+
+    private fun hasRecordAudioPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        } else true
+    }
+
+    private fun startVoice(mode: Int) {
+        if (voiceMode != 0) {
+            stopVoice(resetStatus = true)
+            return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            showVoiceStatus("Không hỗ trợ giọng nói", 2000)
+            return
+        }
+        if (!hasRecordAudioPermission()) {
+            showVoiceStatus("Cần cấp quyền Micro", 2500)
+            // thử mở cài đặt quyền của app (từ IME có thể không mở được, nhưng cứ thử)
+            try {
+                val i = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.parse("package:$packageName")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(i)
+            } catch (_: Exception) {}
+            return
+        }
+        finishTelex()
+        try {
+            if (speechRecognizer == null) {
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            }
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "vi-VN")
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            }
+            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    showVoiceStatus(if (mode == 2) "Nghe (VI→EN)..." else "Đang nghe...", 0)
+                }
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {
+                    showVoiceStatus(if (mode == 2) "Đang dịch..." else "Đang xử lý...", 0)
+                }
+                override fun onError(error: Int) {
+                    val msg = when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH -> "Không nhận dạng được"
+                        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Lỗi mạng"
+                        SpeechRecognizer.ERROR_AUDIO -> "Lỗi âm thanh"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Cần quyền Micro"
+                        else -> "Lỗi giọng nói"
+                    }
+                    voiceMode = 0
+                    showVoiceStatus(msg, 2000)
+                }
+                override fun onResults(results: Bundle?) {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val text = matches?.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+                    val m = voiceMode
+                    voiceMode = 0
+                    if (text.isBlank()) {
+                        showVoiceStatus("Không nhận dạng được", 2000)
+                        return
+                    }
+                    if (m == 2) {
+                        showVoiceStatus("Đang dịch...", 0)
+                        translateVoiceToEnglish(text)
+                    } else {
+                        voiceStatus = null
+                        commitTextToApp(text)
+                        rebuild()
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+            voiceMode = mode
+            speechRecognizer?.startListening(intent)
+            showVoiceStatus(if (mode == 2) "Nghe (VI→EN)..." else "Đang nghe...", 0)
+        } catch (e: Exception) {
+            voiceMode = 0
+            showVoiceStatus("Không thể mở micro", 2000)
+        }
+    }
+
+    private fun stopVoice(resetStatus: Boolean) {
+        try { speechRecognizer?.cancel() } catch (_: Exception) {}
+        voiceMode = 0
+        if (resetStatus) {
+            voiceStatus = null
+            rebuild()
+        }
+    }
+
+    private fun showVoiceStatus(msg: String?, clearAfterMs: Long = 0) {
+        voiceStatus = msg
+        rebuild()
+        if (clearAfterMs > 0 && msg != null) {
+            val snapshot = msg
+            handler.postDelayed({
+                if (voiceStatus == snapshot && voiceMode == 0) {
+                    voiceStatus = null
+                    rebuild()
+                }
+            }, clearAfterMs)
+        }
+    }
+
+    private fun translateVoiceToEnglish(text: String) {
+        Thread {
+            var out: String? = null
+            var err = "Lỗi dịch"
+            try {
+                out = requestTranslation(text, "en")
+            } catch (e: UnknownHostException) {
+                err = "Không có mạng"
+            } catch (e: SocketTimeoutException) {
+                err = "Hết thời gian, thử lại"
+            } catch (e: IOException) {
+                val msg = e.message.orEmpty()
+                err = when {
+                    msg.contains("HTTP 429") -> "Bị giới hạn, thử lại sau"
+                    msg.startsWith("HTTP") -> "Lỗi máy chủ, thử lại"
+                    else -> "Lỗi mạng, thử lại"
+                }
+            } catch (_: Exception) {
+                err = "Lỗi dịch"
+            }
+            handler.post {
+                voiceStatus = null
+                if (!out.isNullOrEmpty()) {
+                    commitTextToApp(out)
+                } else {
+                    // nếu dịch lỗi, vẫn chèn nguyên văn tiếng Việt để không mất nội dung
+                    commitTextToApp(text)
+                    showVoiceStatus(err, 2000)
+                    return@post
+                }
+                rebuild()
+            }
+        }.start()
+    }
+
+    private fun commitTextToApp(text: String) {
+        if (text.isEmpty()) return
+        val ic = currentInputConnection ?: return
+        finishTelex()
+        ic.commitText(text, 1)
+    }
+
     // ---------------------------------------------------------------- tự viết hoa
 
     private fun capsMode(): Int {
@@ -1174,7 +1468,6 @@ class SamKeyboardService : InputMethodService() {
         return ic.getCursorCapsMode(inputType)
     }
 
-    /** Cập nhật Shift theo ngữ cảnh (đầu câu thì tự bật Shift). */
     private fun refreshShift(forceRebuild: Boolean = false) {
         val before = shift
         if (layer == Layer.LETTERS && shift == Shift.OFF && capsMode() != 0) {
@@ -1231,7 +1524,6 @@ class SamKeyboardService : InputMethodService() {
         layer = Layer.LETTERS
         rebuild()
         if (source.isNotBlank()) {
-            // Tự dịch và thay thế trực tiếp lên ô chat khi bấm Dịch
             translateNow(auto = false)
         }
     }
@@ -1277,7 +1569,6 @@ class SamKeyboardService : InputMethodService() {
             }
             Kind.ENTER -> {
                 finishTrTelex()
-                // Dịch và thay thế trực tiếp lên ô chat
                 translateNow(auto = false)
                 return
             }
@@ -1335,11 +1626,19 @@ class SamKeyboardService : InputMethodService() {
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
                 )
             }
-            bar.addView(chip("Dịch", 1.3f, c) { openTranslate() })
-            bar.addView(View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 5f)
-            })
-            bar.addView(chip("⌨", 0.9f, c) {
+            bar.addView(chip("Dịch", 1.1f, c) { openTranslate() })
+            val micViLabel = if (voiceMode == 1) "⏹" else "🎤"
+            val micEnLabel = if (voiceMode == 2) "⏹" else "VI→EN"
+            bar.addView(chip(micViLabel, 0.8f, c, accent = voiceMode == 1) { startVoice(1) })
+            bar.addView(chip(micEnLabel, 1.0f, c, accent = voiceMode == 2) { startVoice(2) })
+            if (voiceStatus != null) {
+                bar.addView(labelChip(voiceStatus!!, 1.6f, c))
+            } else {
+                bar.addView(View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.6f)
+                })
+            }
+            bar.addView(chip("⌨", 0.8f, c) {
                 showKbSettings = !showKbSettings
                 rebuild()
             })
@@ -1363,10 +1662,9 @@ class SamKeyboardService : InputMethodService() {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
             )
         }
-        control.addView(chip("Sang: " + targets[targetIndex].name, 2.6f, c) {
+        control.addView(chip("Sang: " + targets[targetIndex].name, 2.4f, c) {
             targetIndex = (targetIndex + 1) % targets.size
             rebuild()
-            // Đổi ngôn ngữ đích -> dịch và thay thế trực tiếp
             if (trSourceText().isNotBlank()) translateNow(auto = false)
         })
         val actionLabel = when {
@@ -1374,8 +1672,7 @@ class SamKeyboardService : InputMethodService() {
             translateStatus != null && trResult.isEmpty() -> translateStatus!!
             else -> "Dịch"
         }
-        control.addView(chip(actionLabel, 1.3f, c, accent = true) {
-            // Bấm Dịch -> dịch và thay thế trực tiếp lên ô chat
+        control.addView(chip(actionLabel, 1.2f, c, accent = true) {
             translateNow(auto = false)
         })
         control.addView(chip("⌨", 0.7f, c) {
@@ -1411,9 +1708,7 @@ class SamKeyboardService : InputMethodService() {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
             ).apply { setMargins(dp(3), dp(2), dp(3), dp(4)) }
             text = resLabel
-            setTextColor(
-                if (trResult.isNotEmpty() && !trTranslating) c.text else Color.GRAY
-            )
+            setTextColor(if (trResult.isNotEmpty() && !trTranslating) c.text else Color.GRAY)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(4), dp(10), dp(4))
@@ -1447,8 +1742,9 @@ class SamKeyboardService : InputMethodService() {
             .apply { setMargins(dp(2), dp(3), dp(2), dp(3)) }
         text = label
         gravity = Gravity.CENTER
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         setTextColor(c.text)
+        maxLines = 1
     }
 
     private fun setTrStatus(status: String?, clearAfterMs: Long = 0) {
@@ -1466,11 +1762,6 @@ class SamKeyboardService : InputMethodService() {
         }
     }
 
-    /**
-     * Dịch nội dung trong ô nhập của bảng dịch (tự nhận diện ngôn ngữ nguồn).
-     * auto=false (bấm Dịch/Enter/đổi ngôn ngữ): khi có kết quả sẽ thay thế trực tiếp vào ô chat.
-     * auto=true (tự dịch khi gõ): chỉ hiển thị bản dịch xem trước.
-     */
     private fun translateNow(auto: Boolean = false) {
         handler.removeCallbacks(trAutoTranslate)
         finishTrTelex()
@@ -1508,7 +1799,7 @@ class SamKeyboardService : InputMethodService() {
                     msg.startsWith("HTTP") -> "Lỗi máy chủ, thử lại"
                     else -> "Lỗi mạng, thử lại"
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 err = "Lỗi dịch"
             }
             handler.post { onTrTranslated(job, out, err) }
@@ -1535,7 +1826,6 @@ class SamKeyboardService : InputMethodService() {
         }
     }
 
-    /** Thay thế văn bản trong ô nhập của ứng dụng bằng bản dịch. */
     private fun applyTranslation() {
         if (trResult.isEmpty()) {
             setTrStatus("Chưa có bản dịch", 1500)
@@ -1566,9 +1856,6 @@ class SamKeyboardService : InputMethodService() {
         closeTranslate()
     }
 
-    /**
-     * Gọi dịch vụ dịch của Google (không cần khóa API), tự nhận diện ngôn ngữ nguồn.
-     */
     private fun requestTranslation(text: String, target: String): String {
         val encodedText = URLEncoder.encode(text, "UTF-8")
         val params = "client=gtx&sl=auto&tl=" + URLEncoder.encode(target, "UTF-8") + "&dt=t"
